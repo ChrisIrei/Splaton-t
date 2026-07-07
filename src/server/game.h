@@ -47,6 +47,11 @@ struct PlayerState {
     float shieldT = 0;                  // bubbler seconds left
     float spawnShieldT = 0;             // post-respawn protection (breaks on firing)
     float lastInputAge = 0;             // humans: buttons cleared if inputs stop
+    // lag compensation: recent positions (one per tick) + shooter RTT
+    static constexpr int HIST = 16;
+    Vec2 posHist[HIST];
+    int histI = 0;
+    float rttS = 0;                     // round-trip time in seconds (humans)
 
     u16 kills = 0, deaths = 0;
     u32 paintCells = 0;
@@ -131,6 +136,8 @@ private:
     void updateStorms(float dt);
     // paint-cell attribution + special-meter charge for cells added since `before`
     void creditPaint(int owner, size_t before);
+    // victim position rewound by the shooter's latency (lag compensation)
+    Vec2 targetPos(int shooter, int victim) const;
     void throwBomb(PlayerState& p, int slot);
     void explodeAt(Vec2 pos, u8 team, int owner, float rInner, float dmgInner,
                    float rOuter, float dmgOuter, float paintR, int skipSlot = -1);

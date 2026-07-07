@@ -146,8 +146,8 @@ constexpr u8 WEAPON_SPECIAL[W_COUNT] = {
     SP_INKSTORM,   // Charger
     SP_INKZOOKA,   // Splatling
 };
-constexpr float SPECIAL_COST = 220.0f;         // paint cells to fill the meter
-constexpr float SPECIAL_KILL_POINTS = 18.0f;   // meter points per splat
+constexpr float SPECIAL_COST = 360.0f;         // paint cells to fill the meter
+constexpr float SPECIAL_KILL_POINTS = 25.0f;   // meter points per splat
 constexpr float ZOOKA_TIME = 6.0f;             // s of Inkzooka mode
 constexpr float ZOOKA_INTERVAL = 0.55f;        // s between zooka blasts
 constexpr float ZOOKA_RANGE = 320.0f;

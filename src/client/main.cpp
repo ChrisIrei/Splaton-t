@@ -166,6 +166,7 @@ struct App {
     bool escMenu = false;
     u8 intro = 0;                       // 3-2-1-GO deciseconds from the snapshot
     u8 prevIntro = 0;
+    float goFlash = 0;
     int lastKillerSlot = -1;            // death cam target
     Vec2 camFocus{};
     float dmgFlash[MAX_PLAYERS] = {};   // white-flash timers on hp drops
@@ -723,7 +724,10 @@ static void updateMatch(float dt) {
     if (g.prevIntro > 0 && g.intro == 0) {
         g.as.playS(g.as.sStart);
         g.prevIntro = 0;
+        g.camShake = std::max(g.camShake, 2.0f);
+        g.goFlash = 0.9f;
     }
+    if (g.goFlash > 0) g.goFlash -= dt;
 
     // quick chat
     if (!g.ap.on && !g.escMenu) {
@@ -939,6 +943,8 @@ static void drawMatch() {
             DrawCircleLines((int)sx, (int)sy, r, Fade(teamColorDark(g.colorPair, team), 0.6f));
             continue;
         }
+        if (swimming && under == team && GetRandomValue(0, 99) < 35)     // swim wake droplets
+            spawnBurst({ x, y }, teamColorDark(g.colorPair, team), 1, 18);
 
         DrawEllipse((int)sx, (int)(sy + 5), 6, 3, Fade(BLACK, 0.25f));    // shadow
         Texture2D tex = swimming ? g.as.squid[ti] : g.as.kid[ti][g.roster[i].weapon][g.roster[i].skin];
@@ -1144,9 +1150,15 @@ static void drawMatch() {
         DrawRectangleLines(mx - 2, my - 2, 52, 36, Color{ 110, 106, 150, 255 });
     }
 
+    if (g.goFlash > 0) {
+        int size = 40;
+        DrawText("GO!", VW / 2 - MeasureText("GO!", size) / 2, VH / 2 - 20, size,
+                 Fade(WHITE, std::min(1.0f, g.goFlash * 2)));
+    }
+
     if (g.matchClock < 6.0f) {
         const char* mapLabel = TextFormat("- %s -", MAP_NAMES[g.mapId % MAP_COUNT]);
-        DrawText(mapLabel, VW / 2 - MeasureText(mapLabel, 10) / 2, 56, 10, Fade(WHITE, 0.9f));
+        DrawText(mapLabel, VW / 2 - MeasureText(mapLabel, 10) / 2, VH - 28, 10, Fade(WHITE, 0.9f));
         if (!g.ap.on) {
             const char* hint = "WASD move · LMB shoot · RMB/Q bomb · F special · SHIFT swim · C/X/V/B chat · ESC menu";
             DrawText(hint, VW / 2 - MeasureText(hint, 10) / 2, VH - 14, 10, Fade(WHITE, 0.8f));
@@ -1609,7 +1621,9 @@ int main(int argc, char** argv) {
 
     SetTraceLogLevel(LOG_WARNING);
     loadDisplayCfg();
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);     // any size works; blit letterboxes
     InitWindow(VW * g_disp.scale, VH * g_disp.scale, "Splaton't");
+    SetWindowMinSize(VW, VH);
     if (g_disp.fullscreen) applyDisplay();
     SetExitKey(KEY_NULL);
     SetTargetFPS(60);

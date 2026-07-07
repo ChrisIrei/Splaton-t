@@ -34,5 +34,6 @@ struct Host {
 
 std::string peerAddress(void* peer);
 uint32_t peerHost(void* peer);   // raw IPv4 for rate limiting
+uint32_t peerRTT(void* peer);    // smoothed round-trip time, ms
 
 } // namespace net

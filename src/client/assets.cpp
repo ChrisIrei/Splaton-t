@@ -416,8 +416,13 @@ static float pluck(float t, float freq, float amp, float decay) {
     return sq * amp * expf(-t * decay);
 }
 
+static float kickDrum(float t) {   // pitched-down thump
+    if (t < 0 || t > 0.16f) return 0;
+    return sinf(6.2832f * (90.0f - 320.0f * t) * t) * expf(-t * 16.0f) * 0.55f;
+}
+
 static Wave makeMenuLoop() {
-    // 8 bars, 100 BPM, Am F C G — mellow plucks over a soft bass
+    // 8 bars, 100 BPM, Am F C G — warm sub bass under mellow plucks
     const float beat = 0.6f;
     const float dur = 16 * beat;
     static const int roots[4] = { 0, -4, 3, -2 };            // A F C G
@@ -426,19 +431,22 @@ static Wave makeMenuLoop() {
         float bt = t - b * beat;
         int root = roots[(b / 4) % 4];
         float out = 0;
-        out += pluck(bt, noteFreq(root) * 0.5f, 0.10f, 4.0f);           // bass on the beat
-        int arpStep = (int)(bt / (beat / 2));                           // 8th-note arp
+        // sustained sub sine, one octave below the old bass
+        out += sinf(6.2832f * noteFreq(root) * 0.25f * t) * 0.20f * (0.75f + 0.25f * expf(-bt * 3.0f));
+        out += pluck(bt, noteFreq(root) * 0.5f, 0.07f, 4.0f);           // bass pick on the beat
+        int arpStep = (int)(bt / (beat / 2));                           // 8th-note arp, chord tones
         static const int arp[2] = { 7, 12 };
         float at = bt - arpStep * (beat / 2);
-        out += sinf(6.2832f * noteFreq(root + arp[arpStep & 1]) * t) * 0.06f * expf(-at * 6.0f);
+        out += sinf(6.2832f * noteFreq(root + arp[arpStep & 1]) * t) * 0.05f * expf(-at * 6.0f);
         if (bt > beat * 0.5f)                                           // offbeat hat tick
-            out += frnd() * 0.015f * expf(-(bt - beat * 0.5f) * 60.0f);
-        return out;
+            out += frnd() * 0.012f * expf(-(bt - beat * 0.5f) * 60.0f);
+        float edge = std::min(1.0f, std::min(t / 0.03f, (dur - t) / 0.03f));
+        return out * edge;                                              // click-free loop seam
     });
 }
 
 static Wave makeMatchLoop() {
-    // 8 bars, 138 BPM — driving bass eighths, punchy lead, snare on 2 & 4
+    // 8 bars, 138 BPM — kick on the beat, sub bass, pentatonic lead
     const float beat = 0.435f;
     const float dur = 32 * beat;
     static const int roots[4] = { 0, 0, -4, -2 };
@@ -447,14 +455,19 @@ static Wave makeMatchLoop() {
         int b = (int)(t / beat);
         float bt = t - b * beat;
         int root = roots[(b / 8) % 4];
-        float out = 0;
-        float et = fmodf(bt, beat / 2);                                 // bass 8ths
-        out += pluck(et, noteFreq(root) * 0.5f, 0.11f, 10.0f);
-        int li = (b * 2 + (bt >= beat / 2 ? 1 : 0)) % 16;               // lead 8ths
-        out += pluck(fmodf(bt, beat / 2), noteFreq(root + lead[li]), 0.055f, 7.0f);
+        float out = kickDrum(bt);                                       // four-on-the-floor kick
+        out += sinf(6.2832f * noteFreq(root) * 0.25f * t) * 0.17f;      // sustained sub bass
+        float et = fmodf(bt, beat / 2);                                 // bass 8ths, quieter
+        out += pluck(et, noteFreq(root) * 0.5f, 0.06f, 10.0f);
+        int li = (b * 2 + (bt >= beat / 2 ? 1 : 0)) % 16;               // pentatonic lead
+        float lt = fmodf(bt, beat / 2);
+        float lf = noteFreq(root + lead[li]);
+        out += (sinf(6.2832f * lf * t) * 0.6f + (sinf(6.2832f * lf * t) > 0 ? 0.4f : -0.4f))
+               * 0.045f * expf(-lt * 7.0f);                             // softened square+sine mix
         if ((b & 1) == 1)                                               // snare on 2 & 4
-            out += frnd() * 0.06f * expf(-bt * 25.0f);
-        return out;
+            out += frnd() * 0.045f * expf(-bt * 25.0f);
+        float edge = std::min(1.0f, std::min(t / 0.03f, (dur - t) / 0.03f));
+        return out * edge;
     });
 }
 

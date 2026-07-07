@@ -533,6 +533,11 @@ int main(int argc, char** argv) {
                 }
             }
 
+            // feed peer RTTs into the sim for lag compensation
+            for (auto& [peer, s] : sessions)
+                if (s.st == Session::INGAME && s.room >= 0)
+                    rooms[s.room].match.players[s.slot].rttS = net::peerRTT(peer) / 1000.0f;
+
             for (int r = 0; r < MAX_ROOMS; r++) {
                 Room& room = rooms[r];
                 if (!room.running) continue;

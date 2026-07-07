@@ -184,6 +184,19 @@ void Match::spawnPellets(PlayerState& p, int slot, const WeaponDef& wd, int pell
     }
 }
 
+// Rewind the victim to roughly where the shooter saw them: half their RTT
+// plus the client's interpolation delay. Bots aim at server-present state.
+Vec2 Match::targetPos(int shooter, int victim) const {
+    const PlayerState& v = players[victim];
+    if (shooter < 0 || shooter >= MAX_PLAYERS || players[shooter].isBot) return v.pos;
+    float back = players[shooter].rttS * 0.5f + 0.12f;
+    if (back > 0.4f) back = 0.4f;
+    int ticks = (int)(back * TICK_RATE + 0.5f);
+    if (ticks <= 0) return v.pos;
+    if (ticks > PlayerState::HIST - 1) ticks = PlayerState::HIST - 1;
+    return v.posHist[(v.histI - ticks + PlayerState::HIST) % PlayerState::HIST];
+}
+
 void Match::creditPaint(int owner, size_t before) {
     u32 n = (u32)(paintDeltas.size() - before);
     if (owner < 0 || owner >= MAX_PLAYERS || !players[owner].active) return;
@@ -289,7 +302,7 @@ void Match::fireChargerRay(PlayerState& p, int slot, float t) {
         for (int j = 0; j < MAX_PLAYERS; j++) {
             PlayerState& q = players[j];
             if (!q.active || q.dead || q.team == p.team) continue;
-            Vec2 dq = q.pos - pos;
+            Vec2 dq = targetPos(slot, j) - pos;
             if (dq.x * dq.x + dq.y * dq.y < (PLAYER_R + 2.5f) * (PLAYER_R + 2.5f)) {
                 damagePlayer(j, dmg, slot);
                 hitSomeone = true;
@@ -317,7 +330,7 @@ void Match::fireZookaRay(PlayerState& p, int slot) {
         for (int j = 0; j < MAX_PLAYERS; j++) {
             PlayerState& q = players[j];
             if (!q.active || q.dead || q.team == p.team) continue;
-            Vec2 dq = q.pos - pos;
+            Vec2 dq = targetPos(slot, j) - pos;
             if (dq.x * dq.x + dq.y * dq.y < (PLAYER_R + 4.0f) * (PLAYER_R + 4.0f))
                 damagePlayer(j, ZOOKA_DMG, slot);   // pierces through players
         }
@@ -537,7 +550,7 @@ void Match::updateProjectiles(float dt) {
             for (int j = 0; j < MAX_PLAYERS; j++) {
                 PlayerState& q = players[j];
                 if (!q.active || q.dead || q.team == pr.team) continue;
-                Vec2 dq = q.pos - pr.pos;
+                Vec2 dq = targetPos(pr.owner, j) - pr.pos;
                 float rr = PLAYER_R + 2.5f;
                 if (dq.x * dq.x + dq.y * dq.y < rr * rr) {
                     damagePlayer(j, pr.dmg, pr.owner);
@@ -634,6 +647,8 @@ void Match::update(float dt) {
         if (p.ink > INK_MAX) p.ink = INK_MAX;
 
         p.prevButtons = p.buttons;
+        p.histI = (p.histI + 1) % PlayerState::HIST;    // lag-comp position history
+        p.posHist[p.histI] = p.pos;
     }
 
     updateProjectiles(dt);
