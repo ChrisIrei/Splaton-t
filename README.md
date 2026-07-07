@@ -88,9 +88,17 @@ want to try it:
   lengths, TDM kill target, and lobby countdown without recompiling.
 
 To host: run `splatont_server.exe` on the host machine, forward **UDP 27777**
-(or your configured port) on the router, and give players your public IP. For
-anything serious later, the remaining work is server-authoritative movement
-(currently client-predicted and clamped) and lag compensation.
+(or your configured port) on the router, then click **COPY MY JOIN CODE** on
+the client's title screen and send friends the code (e.g. `SQ-4RA4W-7V80P`).
+They paste it into the address box. Codes mask your IP from casual eyes but
+are decodable by anyone holding one — for true IP privacy, tunnel with
+**playit.gg** (free, UDP, no port forwarding) or **Tailscale** and share that
+hostname instead; the address box accepts hostnames and `host:port`.
+
+Hit registration is lag-compensated (targets rewound by the shooter's
+latency), so play over the internet feels fair up to moderate ping. The
+remaining hardening item for serious public hosting is fully
+server-authoritative movement (currently client-predicted and clamped).
 
 ### Controls
 

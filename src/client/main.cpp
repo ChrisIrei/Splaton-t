@@ -239,8 +239,70 @@ static void addFeed(const std::string& text, u8 team) {
 
 // ---------------- network actions ----------------
 
-static bool doConnect(const std::string& ip) {
-    if (!g.host.connectTo(ip, DEFAULT_PORT)) {
+// ---- join codes: ip4+port XOR-masked into Crockford base32, "SQ-XXXXX-XXXXX".
+// Masks the address from casual eyes; anyone with the code can decode it.
+static const char* B32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+static const u8 CODE_KEY[6] = { 0x53, 0x51, 0x49, 0x44, 0x21, 0x7A };
+
+static std::string encodeJoinCode(const std::string& ip, u16 port) {
+    unsigned a, b, c, d;
+    if (sscanf(ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return "";
+    u8 v[6] = { (u8)a, (u8)b, (u8)c, (u8)d, (u8)(port & 0xff), (u8)(port >> 8) };
+    for (int i = 0; i < 6; i++) v[i] ^= CODE_KEY[i];
+    unsigned long long n = 0;
+    for (int i = 0; i < 6; i++) n = (n << 8) | v[i];
+    char cs[11];
+    for (int i = 9; i >= 0; i--) { cs[i] = B32[n & 31]; n >>= 5; }
+    return std::string("SQ-") + std::string(cs, 5) + "-" + std::string(cs + 5, 5);
+}
+
+static bool decodeJoinCode(const std::string& code, std::string& ip, u16& port) {
+    std::string t;
+    for (char ch : code) {
+        ch = (char)toupper((unsigned char)ch);
+        if (ch == '-' || ch == ' ') continue;
+        if (ch == 'O') ch = '0';
+        if (ch == 'I' || ch == 'L') ch = '1';
+        t += ch;
+    }
+    if (t.rfind("SQ", 0) == 0) t = t.substr(2);
+    if (t.size() != 10) return false;
+    unsigned long long n = 0;
+    for (char ch : t) {
+        const char* p = strchr(B32, ch);
+        if (!p) return false;
+        n = (n << 5) | (unsigned long long)(p - B32);
+    }
+    u8 v[6];
+    for (int i = 5; i >= 0; i--) { v[i] = (u8)(n & 0xff); n >>= 8; }
+    for (int i = 0; i < 6; i++) v[i] ^= CODE_KEY[i];
+    char buf[24];
+    snprintf(buf, sizeof buf, "%u.%u.%u.%u", v[0], v[1], v[2], v[3]);
+    ip = buf;
+    port = (u16)(v[4] | (v[5] << 8));
+    return true;
+}
+
+// accepts a join code, "host:port", bare IP, or hostname (tunnels like playit.gg)
+static void parseAddress(const std::string& input, std::string& host, u16& port) {
+    host = input;
+    port = DEFAULT_PORT;
+    if (decodeJoinCode(input, host, port)) return;
+    size_t colon = input.rfind(':');
+    if (colon != std::string::npos && colon > 0) {
+        int p = atoi(input.substr(colon + 1).c_str());
+        if (p > 0 && p < 65536) {
+            host = input.substr(0, colon);
+            port = (u16)p;
+        }
+    }
+}
+
+static bool doConnect(const std::string& input) {
+    std::string ip;
+    u16 port;
+    parseAddress(input, ip, port);
+    if (!g.host.connectTo(ip, port)) {
         g.status = "Could not reach server at " + ip;
         return false;
     }
@@ -1223,13 +1285,13 @@ static void drawMenuBackdrop(const char* subtitle) {
 
 static void screenConnect() {
     drawMenuBackdrop("a very unofficial ink-em-up");
-    Rectangle panel = { VW / 2.0f - 90, 92, 180, 152 };
+    Rectangle panel = { VW / 2.0f - 90, 88, 180, 172 };
     uiPanel(panel);
-    DrawText("SERVER ADDRESS", (int)panel.x + 10, (int)panel.y + 10, 10, GRAY);
-    uiTextBox({ panel.x + 10, panel.y + 24, 160, 18 }, g.ip, 1, false, 32, "127.0.0.1");
-    if (uiButton({ panel.x + 10, panel.y + 50, 160, 20 }, "CONNECT"))
+    DrawText("ADDRESS / JOIN CODE", (int)panel.x + 10, (int)panel.y + 8, 10, GRAY);
+    uiTextBox({ panel.x + 10, panel.y + 20, 160, 18 }, g.ip, 1, false, 32, "127.0.0.1 or SQ-...");
+    if (uiButton({ panel.x + 10, panel.y + 44, 160, 20 }, "CONNECT"))
         doConnect(g.ip);
-    if (uiButton({ panel.x + 10, panel.y + 74, 160, 20 }, "HOST + PLAY (local server)")) {
+    if (uiButton({ panel.x + 10, panel.y + 68, 160, 20 }, "HOST + PLAY (local server)")) {
         if (launchLocalServer()) {
             g.status = "Starting local server...";
             g.hostConnectT = 1.1f;
@@ -1237,14 +1299,24 @@ static void screenConnect() {
             g.status = "Could not start splatont_server.exe";
         }
     }
-    if (uiButton({ panel.x + 10, panel.y + 98, 77, 20 }, "SETTINGS")) {
+    if (uiButton({ panel.x + 10, panel.y + 92, 160, 20 }, "COPY MY JOIN CODE")) {
+        char pub[24];
+        if (fetchPublicIP(pub, sizeof pub)) {
+            std::string code = encodeJoinCode(pub, DEFAULT_PORT);
+            SetClipboardText(code.c_str());
+            g.status = "Copied: " + code;
+        } else {
+            g.status = "Could not detect public IP (offline?)";
+        }
+    }
+    if (uiButton({ panel.x + 10, panel.y + 116, 77, 20 }, "SETTINGS")) {
         g.settingsFrom = SC_CONNECT;
         g.screen = SC_SETTINGS;
     }
-    if (uiButton({ panel.x + 93, panel.y + 98, 77, 20 }, "QUIT"))
+    if (uiButton({ panel.x + 93, panel.y + 116, 77, 20 }, "QUIT"))
         g.quit = true;
     if (!g.status.empty())
-        DrawText(g.status.c_str(), VW / 2 - MeasureText(g.status.c_str(), 10) / 2, (int)panel.y + 128, 10,
+        DrawText(g.status.c_str(), VW / 2 - MeasureText(g.status.c_str(), 10) / 2, (int)panel.y + 146, 10,
                  Color{ 255, 170, 90, 255 });
 
     if (g.hostConnectT >= 0) {
@@ -1542,7 +1614,7 @@ static void autopilotDrive() {
     switch (g.screen) {
     case SC_CONNECT:
         if (!g.netUp && g.hostConnectT < 0) {
-            if (!doConnect("127.0.0.1")) {
+            if (!doConnect(g.ip)) {
                 printf("AUTOTEST: FAIL connect\n");
                 g.quit = true;
             }
@@ -1609,6 +1681,19 @@ static void autopilotPost(float dt) {
 // ---------------- main ----------------
 
 int main(int argc, char** argv) {
+    // join-code utilities (also used by tests)
+    if (argc >= 4 && strcmp(argv[1], "--encode") == 0) {
+        printf("%s\n", encodeJoinCode(argv[2], (u16)atoi(argv[3])).c_str());
+        return 0;
+    }
+    if (argc >= 3 && strcmp(argv[1], "--decode") == 0) {
+        std::string ip;
+        u16 port;
+        if (decodeJoinCode(argv[2], ip, port)) { printf("%s:%u\n", ip.c_str(), port); return 0; }
+        printf("invalid code\n");
+        return 1;
+    }
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--auto") == 0 && i + 4 < argc) {
             g.ap.on = true;
@@ -1616,6 +1701,7 @@ int main(int argc, char** argv) {
             g.ap.pass = argv[i + 2];
             g.ap.mode = (u8)atoi(argv[i + 3]);
             g.ap.dur = (float)atof(argv[i + 4]);
+            if (i + 5 < argc) g.ip = argv[i + 5];   // optional address / join code
         }
     }
 
