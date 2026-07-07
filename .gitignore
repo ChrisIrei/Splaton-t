@@ -1,0 +1,6 @@
+build/
+*.db
+settings.txt
+server.cfg
+shot_*.png
+*.exe
