@@ -81,6 +81,10 @@ void Host::close() {
     clientPeer = nullptr;
 }
 
+uint32_t peerHost(void* peer) {
+    return peer ? ((ENetPeer*)peer)->address.host : 0;
+}
+
 std::string peerAddress(void* peer) {
     if (!peer) return "?";
     ENetAddress a = ((ENetPeer*)peer)->address;

@@ -22,26 +22,38 @@ enum Screen { SC_CONNECT, SC_LOGIN, SC_MENU, SC_LOADOUT, SC_LOBBY, SC_MATCH, SC_
 
 // ---------------- display settings (persisted next to the exe) ----------------
 
-struct DisplayCfg { int scale = 2; bool fullscreen = false; };
+struct DisplayCfg { int scale = 2; bool fullscreen = false; int music = 55, sfx = 80, showFps = 0; };
 static DisplayCfg g_disp;
 
 static std::string settingsPath() { return std::string(GetApplicationDirectory()) + "settings.txt"; }
 
+static void applyVolumes() {
+    g_musVol = g_disp.music / 100.0f;
+    g_sfxVol = g_disp.sfx / 100.0f;
+}
+
 static void loadDisplayCfg() {
     FILE* f = fopen(settingsPath().c_str(), "r");
-    if (!f) return;
-    int s = 2, fs = 0;
-    if (fscanf(f, "scale %d fullscreen %d", &s, &fs) == 2) {
-        g_disp.scale = s < 1 ? 1 : (s > 3 ? 3 : s);
-        g_disp.fullscreen = fs != 0;
+    if (f) {
+        char key[32];
+        int val;
+        while (fscanf(f, "%31s %d", key, &val) == 2) {
+            if (!strcmp(key, "scale")) g_disp.scale = val < 1 ? 1 : (val > 3 ? 3 : val);
+            else if (!strcmp(key, "fullscreen")) g_disp.fullscreen = val != 0;
+            else if (!strcmp(key, "music")) g_disp.music = val < 0 ? 0 : (val > 100 ? 100 : val);
+            else if (!strcmp(key, "sfx")) g_disp.sfx = val < 0 ? 0 : (val > 100 ? 100 : val);
+            else if (!strcmp(key, "fps")) g_disp.showFps = val != 0;
+        }
+        fclose(f);
     }
-    fclose(f);
+    applyVolumes();
 }
 
 static void saveDisplayCfg() {
     FILE* f = fopen(settingsPath().c_str(), "w");
     if (!f) return;
-    fprintf(f, "scale %d fullscreen %d\n", g_disp.scale, g_disp.fullscreen ? 1 : 0);
+    fprintf(f, "scale %d\nfullscreen %d\nmusic %d\nsfx %d\nfps %d\n",
+        g_disp.scale, g_disp.fullscreen ? 1 : 0, g_disp.music, g_disp.sfx, g_disp.showFps);
     fclose(f);
 }
 
@@ -71,7 +83,7 @@ static void blitParams(int& s, int& ox, int& oy) {
 struct RosterEntry {
     bool active = false;
     std::string name;
-    u8 team = TEAM_NONE, weapon = 0, skin = 0;
+    u8 team = TEAM_NONE, weapon = 0, skin = 0, hat = 0;
     bool isBot = false;
 };
 struct SnapPlayer {
@@ -79,6 +91,7 @@ struct SnapPlayer {
     float x = 0, y = 0, aim = 0;
     u8 hp = 0, ink = 0, flags = 0;
     float respawn = 0;
+    u8 special = 0, kills = 0, deaths = 0;
 };
 struct ProjView { float x, y; u8 team, kind, aux; };
 struct Snapshot {
@@ -91,7 +104,7 @@ struct Snapshot {
 };
 struct FeedItem { std::string text; u8 team; double t; };
 struct Particle { Vec2 pos, vel; float life, maxLife, size; Color col; };
-struct ResultRow { u8 slot; std::string name; u8 team; u16 kills, deaths, paint; };
+struct ResultRow { u8 slot; std::string name; u8 team; u16 kills, deaths, paint, coins; };
 
 struct AutoPilot {
     bool on = false;
@@ -111,7 +124,7 @@ struct AutoPilot {
 struct LocalInput {
     Vec2 move{};
     float aim = 0;
-    bool fire = false, swim = false, bomb = false;
+    bool fire = false, swim = false, bomb = false, special = false;
 };
 
 struct App {
@@ -127,9 +140,12 @@ struct App {
 
     // account
     std::string accName;
-    u8 weapon = 0, skin = 0, sub = 0;
+    std::string token;                  // session resume token
+    u8 weapon = 0, skin = 0, sub = 0, hat = 0;
+    u32 coins = 0;
+    u16 hatsOwned = 1;
     u32 stKills = 0, stDeaths = 0, stWins = 0, stLosses = 0, stMatches = 0, stPaint = 0;
-    u8 selWeapon = 0, selSkin = 0, selSub = 0;
+    u8 selWeapon = 0, selSkin = 0, selSub = 0, selHat = 0;
     Screen settingsFrom = SC_CONNECT;
 
     // lobby
@@ -147,6 +163,16 @@ struct App {
     float pingTimer = 0;
     float localBarrage = 0;             // splatling prediction
     bool prevBombHeld = false;
+    bool escMenu = false;
+    u8 intro = 0;                       // 3-2-1-GO deciseconds from the snapshot
+    u8 prevIntro = 0;
+    int lastKillerSlot = -1;            // death cam target
+    Vec2 camFocus{};
+    float dmgFlash[MAX_PLAYERS] = {};   // white-flash timers on hp drops
+    u8 hpPrev[MAX_PLAYERS] = {};
+    u8 chatMsg[MAX_PLAYERS];            // speech bubbles (255 = none)
+    double chatT[MAX_PLAYERS] = {};
+    bool specialWasFull = false;
     RosterEntry roster[MAX_PLAYERS];
     std::deque<Snapshot> snaps;
     Snapshot latest;
@@ -235,12 +261,20 @@ static void sendAuth(u8 msgId) {
     g.status = "...";
 }
 
-static void sendLoadout(u8 weapon, u8 skin, u8 sub) {
+static void sendLoadout(u8 weapon, u8 skin, u8 sub, u8 hat) {
     BufW w;
     w.u8_(C_SET_LOADOUT);
     w.u8_(weapon);
     w.u8_(skin);
     w.u8_(sub);
+    w.u8_(hat);
+    sendMsg(w, true);
+}
+
+static void sendQuickChat(u8 msg) {
+    BufW w;
+    w.u8_(C_QUICKCHAT);
+    w.u8_(msg);
     sendMsg(w, true);
 }
 
@@ -268,9 +302,9 @@ static void leaveMatchToMenu() {
 static void readRosterEntry(BufR& r) {
     u8 slot = r.u8_();
     std::string name = r.str();
-    u8 team = r.u8_(), weapon = r.u8_(), skin = r.u8_(), flags = r.u8_();
+    u8 team = r.u8_(), weapon = r.u8_(), skin = r.u8_(), hat = r.u8_(), flags = r.u8_();
     if (slot >= MAX_PLAYERS) return;
-    g.roster[slot] = { true, name, team, weapon, skin, (flags & PF_BOT) != 0 };
+    g.roster[slot] = { true, name, team, weapon, skin, hat, (flags & PF_BOT) != 0 };
 }
 
 static void handleServerMsg(BufR& r) {
@@ -278,7 +312,17 @@ static void handleServerMsg(BufR& r) {
     switch (id) {
     case S_HELLO:
         r.str();
-        if (g.screen == SC_CONNECT) { g.screen = SC_LOGIN; g.status = ""; }
+        if (g.screen == SC_CONNECT) {
+            g.screen = SC_LOGIN;
+            g.status = "";
+            if (!g.token.empty()) {     // try resuming the previous session
+                BufW w;
+                w.u8_(C_RESUME);
+                w.str(g.token);
+                sendMsg(w, true);
+                g.status = "Resuming session...";
+            }
+        }
         break;
     case S_ERROR:
         g.status = r.str();
@@ -286,9 +330,13 @@ static void handleServerMsg(BufR& r) {
     case S_AUTH_OK: {
         r.u32_();
         g.accName = r.str();
+        g.token = r.str();
         g.weapon = r.u8_();
         g.skin = r.u8_();
         g.sub = r.u8_();
+        g.hat = r.u8_();
+        g.coins = r.u32_();
+        g.hatsOwned = r.u16_();
         g.stKills = r.u32_();
         g.stDeaths = r.u32_();
         g.stWins = r.u32_();
@@ -298,12 +346,14 @@ static void handleServerMsg(BufR& r) {
         g.selWeapon = g.weapon;
         g.selSkin = g.skin;
         g.selSub = g.sub;
+        g.selHat = g.hat;
         g.screen = SC_MENU;
         g.status = "";
         break;
     }
     case S_AUTH_FAIL:
         g.status = r.str();
+        g.token.clear();                       // resume failed / bad creds: full login
         if (g.ap.on && !g.ap.triedLogin) {     // name taken from a previous run -> log in
             g.ap.triedLogin = true;
             sendAuth(C_LOGIN);
@@ -313,8 +363,18 @@ static void handleServerMsg(BufR& r) {
         g.weapon = r.u8_();
         g.skin = r.u8_();
         g.sub = r.u8_();
+        g.hat = r.u8_();
         if (g.screen == SC_LOADOUT) g.status = "Loadout saved!";
         break;
+    case S_BUY_RESULT: {
+        u8 ok = r.u8_();
+        g.coins = r.u32_();
+        g.hatsOwned = r.u16_();
+        if (g.screen == SC_LOADOUT)
+            g.status = ok ? "Purchased! Click it again to equip, then SAVE." : "Not enough coins";
+        if (ok) g.as.playS(g.as.sQueue);
+        break;
+    }
     case S_PONG: {
         u32 t = r.u32_();
         g.pingMs = (int)((u32)(g.now * 1000.0) - t);
@@ -350,6 +410,13 @@ static void handleServerMsg(BufR& r) {
         g.localBarrage = 0;
         g.pingMs = -1;
         g.matchClock = 0;
+        g.escMenu = false;
+        g.intro = g.prevIntro = 0;
+        g.lastKillerSlot = -1;
+        g.specialWasFull = false;
+        memset(g.dmgFlash, 0, sizeof g.dmgFlash);
+        memset(g.hpPrev, 100, sizeof g.hpPrev);
+        memset(g.chatMsg, 255, sizeof g.chatMsg);
         g.latest = Snapshot{};
         g.latest.timeLeft = timeLeft;
         u8 t = myTeam();
@@ -386,9 +453,27 @@ static void handleServerMsg(BufR& r) {
             spawnBurst({ x, y }, teamColor(g.colorPair, kTeam), 16, 70);
             if (killer < MAX_PLAYERS && victim < MAX_PLAYERS)
                 addFeed(g.roster[killer].name + " splatted " + g.roster[victim].name, kTeam);
-            if (victim == g.mySlot) { g.as.playS(g.as.sDeath); g.camShake = 5; }
+            if (victim == g.mySlot) {
+                g.as.playS(g.as.sDeath);
+                g.camShake = 5;
+                g.lastKillerSlot = killer;
+            }
             else if (killer == g.mySlot) { g.as.playS(g.as.sKill); g.ap.myKills++; }
             else g.as.sSplat.play(0.9f + (float)GetRandomValue(0, 20) / 100.0f, 0.6f);
+        } else if (ev == EV_CHAT) {
+            u8 slot = r.u8_(), msg = r.u8_();
+            if (slot < MAX_PLAYERS && msg < CHAT_COUNT && g.roster[slot].active) {
+                g.chatMsg[slot] = msg;
+                g.chatT[slot] = g.now;
+                addFeed(g.roster[slot].name + ": " + CHAT_MSGS[msg], g.roster[slot].team);
+                g.as.playS(g.as.sChat, slot == g.mySlot ? 1.1f : 0.95f);
+            }
+        } else if (ev == EV_SPECIAL) {
+            u8 slot = r.u8_(), kind = r.u8_();
+            if (slot < MAX_PLAYERS && kind < SP_COUNT && g.roster[slot].active) {
+                addFeed(g.roster[slot].name + " used " + SPECIAL_NAMES[kind] + "!", g.roster[slot].team);
+                g.as.playS(g.as.sReady, 0.8f);
+            }
         } else if (ev == EV_BOOM) {
             u8 team = r.u8_();
             float x = r.f32_(), y = r.f32_();
@@ -415,6 +500,8 @@ static void handleServerMsg(BufR& r) {
         s.timeLeft = r.f32_();
         s.scoreA = r.u16_();
         s.scoreB = r.u16_();
+        g.prevIntro = g.intro;
+        g.intro = r.u8_();
         u8 n = r.u8_();
         for (int i = 0; i < n && r.ok; i++) {
             u8 slot = r.u8_();
@@ -427,7 +514,15 @@ static void handleServerMsg(BufR& r) {
             p.ink = r.u8_();
             p.flags = r.u8_();
             p.respawn = r.u8_() / 10.0f;
-            if (slot < MAX_PLAYERS) s.pl[slot] = p;
+            p.special = r.u8_();
+            p.kills = r.u8_();
+            p.deaths = r.u8_();
+            if (slot < MAX_PLAYERS) {
+                // white damage flash when someone loses hp
+                if (p.hp + 1 < g.hpPrev[slot] && !(p.flags & PF_DEAD)) g.dmgFlash[slot] = 0.18f;
+                g.hpPrev[slot] = p.hp;
+                s.pl[slot] = p;
+            }
         }
         u8 np = r.u8_();
         for (int i = 0; i < np && r.ok; i++) {
@@ -481,6 +576,7 @@ static void handleServerMsg(BufR& r) {
             row.kills = r.u16_();
             row.deaths = r.u16_();
             row.paint = r.u16_();
+            row.coins = r.u16_();
             g.resRows.push_back(row);
         }
         std::sort(g.resRows.begin(), g.resRows.end(), [](const ResultRow& a, const ResultRow& b) {
@@ -492,6 +588,7 @@ static void handleServerMsg(BufR& r) {
             g.stKills += row.kills;
             g.stDeaths += row.deaths;
             g.stPaint += row.paint;
+            g.coins += row.coins;
             g.stMatches++;
             if (g.resWinner != TEAM_NONE) {
                 if (row.team == g.resWinner) g.stWins++;
@@ -533,8 +630,10 @@ static Vector2 virtualMouse() {
     return { x, y };
 }
 
+static bool interpPlayer(int slot, SnapPlayer& out);
+
 static Vec2 camOffset() {
-    float cx = g.myPos.x - VW / 2.0f, cy = g.myPos.y - VH / 2.0f;
+    float cx = g.camFocus.x - VW / 2.0f, cy = g.camFocus.y - VH / 2.0f;
     cx = std::max(0.0f, std::min((float)(WORLD_W - VW), cx));
     cy = std::max(0.0f, std::min((float)(WORLD_H - VH), cy));
     if (g.camShake > 0.2f) {
@@ -557,6 +656,7 @@ static LocalInput realInput() {
     li.fire = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
     li.swim = IsKeyDown(KEY_LEFT_SHIFT);
     li.bomb = IsMouseButtonDown(MOUSE_BUTTON_RIGHT) || IsKeyDown(KEY_Q);
+    li.special = IsKeyDown(KEY_F) || IsMouseButtonDown(MOUSE_BUTTON_MIDDLE);
     return li;
 }
 
@@ -590,6 +690,7 @@ static LocalInput apInput(float dt) {
     a.fireT += dt;
     li.fire = fmodf(a.fireT, 1.3f) < 0.7f;
     li.bomb = fmodf(a.fireT, 4.7f) < 0.1f;   // lob a bomb every ~5s
+    li.special = g.haveSnap && g.mySlot >= 0 && g.latest.pl[g.mySlot].special >= 100;
     u8 under = g.paint.atPx(g.myPos.x, g.myPos.y);
     bool lowInk = g.haveSnap && g.mySlot >= 0 && g.latest.pl[g.mySlot].ink < 30;
     li.swim = lowInk && under == myTeam();
@@ -600,12 +701,52 @@ static LocalInput apInput(float dt) {
 static void updateMatch(float dt) {
     g.matchClock += dt;
     if (g.camShake > 0) g.camShake = std::max(0.0f, g.camShake - dt * 14);
+    for (auto& f : g.dmgFlash)
+        if (f > 0) f -= dt;
+
+    if (IsKeyPressed(KEY_ESCAPE) && !g.ap.on) g.escMenu = !g.escMenu;
 
     bool dead = g.haveSnap && g.mySlot >= 0 && (g.latest.pl[g.mySlot].flags & PF_DEAD);
     LocalInput li = g.ap.on ? apInput(dt) : realInput();
+    if (g.escMenu || g.intro > 0) {     // pause overlay / 3-2-1-GO: freeze inputs
+        LocalInput frozen;
+        frozen.aim = li.aim;
+        li = frozen;
+    }
     g.localFireHeld = li.fire;
     g.localSwimHeld = li.swim;
     g.myAim = li.aim;
+
+    // intro countdown blips
+    if (g.intro != g.prevIntro && g.intro > 0 && (g.intro / 10) != (g.prevIntro / 10))
+        g.as.playS(g.as.sQueue, 1.2f);
+    if (g.prevIntro > 0 && g.intro == 0) {
+        g.as.playS(g.as.sStart);
+        g.prevIntro = 0;
+    }
+
+    // quick chat
+    if (!g.ap.on && !g.escMenu) {
+        if (IsKeyPressed(KEY_C)) sendQuickChat(0);
+        if (IsKeyPressed(KEY_X)) sendQuickChat(1);
+        if (IsKeyPressed(KEY_V)) sendQuickChat(2);
+        if (IsKeyPressed(KEY_B)) sendQuickChat(3);
+    }
+
+    // "special ready!" jingle on the rising edge
+    if (g.haveSnap && g.mySlot >= 0) {
+        bool full = g.latest.pl[g.mySlot].special >= 100;
+        if (full && !g.specialWasFull) g.as.playS(g.as.sReady);
+        g.specialWasFull = full;
+    }
+
+    // camera: follow your killer while dead, otherwise yourself
+    g.camFocus = g.myPos;
+    if (dead && g.lastKillerSlot >= 0 && g.lastKillerSlot != g.mySlot) {
+        SnapPlayer kp;
+        if (interpPlayer(g.lastKillerSlot, kp) && !(kp.flags & PF_DEAD))
+            g.camFocus = { kp.x, kp.y };
+    }
 
     if (!dead) {
         u8 under = g.paint.atPx(g.myPos.x, g.myPos.y);
@@ -686,6 +827,7 @@ static void updateMatch(float dt) {
             if (li.fire) b |= BTN_FIRE;
             if (li.swim) b |= BTN_SWIM;
             if (li.bomb) b |= BTN_BOMB;
+            if (li.special) b |= BTN_SPECIAL;
             w.u8_(b);
             sendMsg(w, false);
         }
@@ -704,8 +846,6 @@ static void updateMatch(float dt) {
         g.as.updatePaintTex(g.paint, g.colorPair);
         g.paintDirty = false;
     }
-
-    if (IsKeyPressed(KEY_ESCAPE)) leaveMatchToMenu();
 }
 
 // interpolated remote player state (render ~120ms in the past)
@@ -802,8 +942,32 @@ static void drawMatch() {
 
         DrawEllipse((int)sx, (int)(sy + 5), 6, 3, Fade(BLACK, 0.25f));    // shadow
         Texture2D tex = swimming ? g.as.squid[ti] : g.as.kid[ti][g.roster[i].weapon][g.roster[i].skin];
-        DrawTexturePro(tex, { 0, 0, 16, 16 }, { sx, sy, 16, 16 }, { 8, 8 }, aim * RAD2DEG,
-                       swimming && under == team ? Fade(WHITE, 0.85f) : WHITE);
+        Color tint = swimming && under == team ? Fade(WHITE, 0.85f) : WHITE;
+        if (g.dmgFlash[i] > 0) tint = Color{ 255, 140, 140, 255 };        // hit flash
+        DrawTexturePro(tex, { 0, 0, 16, 16 }, { sx, sy, 16, 16 }, { 8, 8 }, aim * RAD2DEG, tint);
+        if (!swimming && g.roster[i].hat > 0 && g.roster[i].hat < HAT_COUNT)
+            DrawTexturePro(g.as.hats[g.roster[i].hat], { 0, 0, 16, 16 },
+                           { sx, sy, 16, 16 }, { 8, 8 }, aim * RAD2DEG, tint);
+
+        if (flags & PF_SHIELD) {                                          // bubbler / spawn shield
+            float r = 11.0f + sinf((float)g.now * 8 + i) * 1.2f;
+            DrawCircle((int)sx, (int)sy, r, Fade(teamColor(g.colorPair, team), 0.18f));
+            DrawCircleLines((int)sx, (int)sy, r, Fade(WHITE, 0.7f));
+        }
+        if (flags & PF_ZOOKA) {                                           // inkzooka aura
+            float r = 10.0f + fmodf((float)g.now * 26 + i * 3, 6.0f);
+            DrawCircleLines((int)sx, (int)sy, r, Fade(teamColor(g.colorPair, team), 0.8f));
+        }
+        if (g.chatMsg[i] != 255) {                                        // speech bubble
+            if (g.now - g.chatT[i] > 2.5) g.chatMsg[i] = 255;
+            else {
+                const char* msg = CHAT_MSGS[g.chatMsg[i]];
+                int tw = MeasureText(msg, 10);
+                DrawRectangle((int)sx - tw / 2 - 3, (int)sy - 26, tw + 6, 13, Fade(WHITE, 0.92f));
+                DrawTriangle({ sx - 3, sy - 13 }, { sx + 3, sy - 13 }, { sx, sy - 9 }, Fade(WHITE, 0.92f));
+                DrawText(msg, (int)sx - tw / 2, (int)sy - 24, 10, Color{ 30, 26, 44, 255 });
+            }
+        }
 
         if (flags & PF_FIRING) {
             Vec2 mz = { x + cosf(aim) * 11, y + sinf(aim) * 11 };
@@ -833,6 +997,23 @@ static void drawMatch() {
             // armed bombs blink faster as the fuse runs out
             if (pv.aux != 255 && pv.aux <= 4 && ((int)(g.now * 12) & 1))
                 DrawCircle((int)sx, (int)sy, 5, Fade(WHITE, 0.8f));
+        } else if (pv.kind == PK_STORM) {
+            Color c = teamColor(g.colorPair, pv.team);
+            DrawCircle((int)sx, (int)sy, STORM_RADIUS, Fade(c, 0.10f));
+            DrawCircleLines((int)sx, (int)sy, STORM_RADIUS, Fade(c, 0.45f));
+            // cloud puffs + falling drips
+            for (int k = 0; k < 3; k++) {
+                float ox = sinf((float)g.now * 1.3f + k * 2.1f) * 10.0f;
+                DrawCircle((int)(sx + ox + (k - 1) * 12), (int)(sy - 4 + (k & 1) * 5), 8.0f,
+                           Fade(Color{ 230, 230, 240, 255 }, 0.35f));
+            }
+            for (int k = 0; k < 4; k++) {
+                u32 h = (u32)(g.now * 9) * 31u + k * 977u;
+                float rx = (float)(h % (u32)(STORM_RADIUS * 2)) - STORM_RADIUS;
+                float ry = (float)((h >> 9) % (u32)(STORM_RADIUS * 2)) - STORM_RADIUS;
+                if (rx * rx + ry * ry < STORM_RADIUS * STORM_RADIUS)
+                    DrawRectangle((int)(sx + rx), (int)(sy + ry), 2, 3, Fade(c, 0.6f));
+            }
         } else { // burst bomb
             DrawCircle((int)sx, (int)sy, 3.5f, teamColor(g.colorPair, pv.team));
             DrawCircle((int)sx, (int)sy, 1.5f, Fade(WHITE, 0.9f));
@@ -867,6 +1048,16 @@ static void drawMatch() {
         DrawRectangle(ix - 2, notch, 14, 1, me.ink >= SUBS[g.sub].inkCost ? WHITE : Color{ 120, 116, 150, 255 });
         DrawText("INK", ix - 4, iy + 54, 10, GRAY);
 
+        // special meter
+        int spx = ix - 56, spy = iy + 44;
+        bool spFull = me.special >= 100;
+        DrawRectangle(spx - 1, spy - 1, 48, 8, Color{ 20, 18, 32, 255 });
+        DrawRectangle(spx, spy, 46 * me.special / 100, 6,
+            spFull && ((int)(g.now * 6) & 1) ? WHITE : teamColor(g.colorPair, myTeam()));
+        DrawRectangleLines(spx - 2, spy - 2, 50, 10, Color{ 150, 146, 190, 255 });
+        DrawText(spFull ? "SPECIAL [F]!" : SPECIAL_NAMES[WEAPON_SPECIAL[g.weapon]],
+                 spx - 2, spy - 12, 10, spFull ? WHITE : GRAY);
+
         // damage vignette
         if (me.hp < 95 && !(me.flags & PF_DEAD)) {
             float a = (1.0f - me.hp / 100.0f) * 0.5f;
@@ -884,13 +1075,56 @@ static void drawMatch() {
                 g.localCharge >= 1 ? WHITE : teamColor(g.colorPair, myTeam()));
         }
 
-        // respawn overlay
+        // respawn overlay (dimmed less so the death cam stays visible)
         if (me.flags & PF_DEAD) {
-            DrawRectangle(0, 0, VW, VH, Fade(BLACK, 0.55f));
+            DrawRectangle(0, 0, VW, VH, Fade(BLACK, 0.35f));
             const char* t1 = "SPLATTED!";
-            DrawText(t1, VW / 2 - MeasureText(t1, 30) / 2, VH / 2 - 30, 30, Color{ 255, 90, 90, 255 });
+            DrawText(t1, VW / 2 - MeasureText(t1, 30) / 2, VH / 2 - 40, 30, Color{ 255, 90, 90, 255 });
+            if (g.lastKillerSlot >= 0 && g.roster[g.lastKillerSlot].active && g.lastKillerSlot != g.mySlot) {
+                const char* by = TextFormat("by %s (%s)", g.roster[g.lastKillerSlot].name.c_str(),
+                                            WEAPONS[g.roster[g.lastKillerSlot].weapon].name);
+                DrawText(by, VW / 2 - MeasureText(by, 10) / 2, VH / 2 - 6, 10,
+                         teamColor(g.colorPair, g.roster[g.lastKillerSlot].team));
+            }
             const char* t2 = TextFormat("respawning in %.1f", me.respawn);
-            DrawText(t2, VW / 2 - MeasureText(t2, 10) / 2, VH / 2 + 6, 10, WHITE);
+            DrawText(t2, VW / 2 - MeasureText(t2, 10) / 2, VH / 2 + 10, 10, WHITE);
+        }
+    }
+
+    // 3-2-1-GO
+    if (g.intro > 0) {
+        DrawRectangle(0, 0, VW, VH, Fade(BLACK, 0.35f));
+        int num = (g.intro + 9) / 10;
+        const char* t = TextFormat("%d", num);
+        DrawText(t, VW / 2 - MeasureText(t, 40) / 2, VH / 2 - 24, 40, WHITE);
+        const char* mn = TextFormat("%s on %s", g.mode == MODE_TURF ? "TURF WAR" : "TEAM DEATHMATCH",
+                                    MAP_NAMES[g.mapId % MAP_COUNT]);
+        DrawText(mn, VW / 2 - MeasureText(mn, 10) / 2, VH / 2 + 22, 10, GRAY);
+    } else if (g.prevIntro > 0 && g.matchClock < 60.0f) {
+        // brief GO! right after the countdown (prevIntro clears on the sound trigger)
+    }
+
+    // TAB scoreboard (autopilot flashes it periodically so tests can screenshot it)
+    bool showBoard = IsKeyDown(KEY_TAB) || (g.ap.on && fmodf((float)g.now, 10.0f) > 7.5f);
+    if (showBoard && g.haveSnap) {
+        Rectangle panel = { VW / 2.0f - 110, 50, 220, 130 };
+        DrawRectangleRec(panel, Fade(Color{ 16, 14, 28, 255 }, 0.92f));
+        DrawRectangleLinesEx(panel, 1, Color{ 110, 106, 150, 255 });
+        DrawText("K", (int)panel.x + 158, (int)panel.y + 6, 10, GRAY);
+        DrawText("D", (int)panel.x + 188, (int)panel.y + 6, 10, GRAY);
+        int y = (int)panel.y + 20;
+        for (int pass = 0; pass < 2; pass++) {
+            u8 team = pass == 0 ? TEAM_A : TEAM_B;
+            for (int i = 0; i < MAX_PLAYERS; i++) {
+                if (!g.roster[i].active || g.roster[i].team != team || !g.latest.pl[i].present) continue;
+                Color c = teamColor(g.colorPair, team);
+                DrawRectangle((int)panel.x + 8, y + 2, 6, 6, c);
+                DrawText(g.roster[i].name.c_str(), (int)panel.x + 20, y, 10,
+                         i == g.mySlot ? WHITE : Color{ 205, 202, 224, 255 });
+                DrawText(TextFormat("%u", g.latest.pl[i].kills), (int)panel.x + 156, y, 10, WHITE);
+                DrawText(TextFormat("%u", g.latest.pl[i].deaths), (int)panel.x + 186, y, 10, WHITE);
+                y += 13;
+            }
         }
     }
 
@@ -914,20 +1148,40 @@ static void drawMatch() {
         const char* mapLabel = TextFormat("- %s -", MAP_NAMES[g.mapId % MAP_COUNT]);
         DrawText(mapLabel, VW / 2 - MeasureText(mapLabel, 10) / 2, 56, 10, Fade(WHITE, 0.9f));
         if (!g.ap.on) {
-            const char* hint = "WASD move · LMB shoot · RMB/Q bomb · SHIFT swim in your ink · ESC leave";
+            const char* hint = "WASD move · LMB shoot · RMB/Q bomb · F special · SHIFT swim · C/X/V/B chat · ESC menu";
             DrawText(hint, VW / 2 - MeasureText(hint, 10) / 2, VH - 14, 10, Fade(WHITE, 0.8f));
         }
     }
 
     if (g.pingMs >= 0)
         DrawText(TextFormat("%d ms", g.pingMs), 6, 4, 10, Fade(GRAY, 0.9f));
+    if (g_disp.showFps)
+        DrawText(TextFormat("%d fps", GetFPS()), 6, 16, 10, Fade(GREEN, 0.8f));
 
-    // crosshair
-    Vector2 vm = virtualMouse();
-    Color cc = Fade(WHITE, 0.9f);
-    DrawLine((int)vm.x - 4, (int)vm.y, (int)vm.x + 4, (int)vm.y, cc);
-    DrawLine((int)vm.x, (int)vm.y - 4, (int)vm.x, (int)vm.y + 4, cc);
-    DrawCircleLines((int)vm.x, (int)vm.y, 6, Fade(teamColor(g.colorPair, myTeam()), 0.7f));
+    // ESC pause overlay (the match keeps running server-side)
+    if (g.escMenu) {
+        DrawRectangle(0, 0, VW, VH, Fade(BLACK, 0.6f));
+        Rectangle panel = { VW / 2.0f - 70, 80, 140, 106 };
+        uiPanel(panel);
+        DrawText("PAUSED", VW / 2 - MeasureText("PAUSED", 20) / 2, (int)panel.y + 8, 20, WHITE);
+        if (uiButton({ panel.x + 10, panel.y + 32, 120, 20 }, "RESUME"))
+            g.escMenu = false;
+        if (uiButton({ panel.x + 10, panel.y + 56, 120, 20 }, "SETTINGS")) {
+            g.settingsFrom = SC_MATCH;
+            g.screen = SC_SETTINGS;
+        }
+        if (uiButton({ panel.x + 10, panel.y + 80, 120, 20 }, "LEAVE MATCH")) {
+            g.escMenu = false;
+            leaveMatchToMenu();
+        }
+    } else {
+        // crosshair
+        Vector2 vm = virtualMouse();
+        Color cc = Fade(WHITE, 0.9f);
+        DrawLine((int)vm.x - 4, (int)vm.y, (int)vm.x + 4, (int)vm.y, cc);
+        DrawLine((int)vm.x, (int)vm.y - 4, (int)vm.x, (int)vm.y + 4, cc);
+        DrawCircleLines((int)vm.x, (int)vm.y, 6, Fade(teamColor(g.colorPair, myTeam()), 0.7f));
+    }
 }
 
 // ---------------- menu screens ----------------
@@ -1032,9 +1286,13 @@ static void screenMenu() {
         g.settingsFrom = SC_MENU;
         g.screen = SC_SETTINGS;
     }
-    if (uiButton({ panel.x + 93, panel.y + 94, 77, 22 }, "LOG OUT"))
+    if (uiButton({ panel.x + 93, panel.y + 94, 77, 22 }, "LOG OUT")) {
+        g.token.clear();
         resetToConnect("");
+    }
 
+    const char* coins = TextFormat("$ %u coins", g.coins);
+    DrawText(coins, VW / 2 - MeasureText(coins, 10) / 2, (int)panel.y - 12, 10, Color{ 252, 206, 48, 255 });
     const char* stats = TextFormat("splats %u   deaths %u   W/L %u/%u   matches %u",
         g.stKills, g.stDeaths, g.stWins, g.stLosses, g.stMatches);
     DrawText(stats, VW / 2 - MeasureText(stats, 10) / 2, (int)panel.y + 128, 10, GRAY);
@@ -1086,7 +1344,6 @@ static void screenLoadout() {
             g.as.playS(g.as.sClick);
         }
     }
-    DrawText(SUBS[g.selSub].desc, 36, 236, 10, GRAY);
 
     // skins
     DrawText("STYLE", 246, 216, 10, GRAY);
@@ -1100,24 +1357,57 @@ static void screenLoadout() {
         }
     }
 
+    // hats: owned = click to equip; locked = click to buy
+    DrawText("HAT", 10, 242, 10, GRAY);
+    for (int h = 0; h < HAT_COUNT; h++) {
+        Rectangle hw = { 36.0f + h * 30, 236, 26, 24 };
+        bool owned = (g.hatsOwned & (1 << h)) != 0;
+        bool sel = g.selHat == h;
+        DrawRectangleRec(hw, owned ? Color{ 34, 32, 52, 245 } : Color{ 18, 17, 28, 245 });
+        DrawRectangleLinesEx(hw, sel ? 2.0f : 1.0f,
+            sel ? Color{ 255, 200, 60, 255 } : (owned ? Color{ 110, 106, 150, 255 } : Color{ 60, 58, 76, 255 }));
+        if (h == 0) DrawText("-", (int)hw.x + 11, (int)hw.y + 7, 10, GRAY);
+        else DrawTexturePro(g.as.hats[h], { 0, 0, 16, 16 }, { hw.x + 5, hw.y + 4, 16, 16 }, { 0, 0 }, 0,
+                            owned ? WHITE : Fade(WHITE, 0.35f));
+        if (!owned)
+            DrawText(TextFormat("%u", HAT_PRICES[h]), (int)hw.x + 2, (int)hw.y + 25, 10,
+                     g.coins >= HAT_PRICES[h] ? Color{ 252, 206, 48, 255 } : Color{ 110, 106, 130, 255 });
+        if (g_ui.pressed && CheckCollisionPointRec(g_ui.mouse, hw)) {
+            if (owned) {
+                g.selHat = (u8)h;
+                g.as.playS(g.as.sClick);
+            } else if (g.coins >= HAT_PRICES[h]) {
+                BufW w;
+                w.u8_(C_BUY_HAT);
+                w.u8_((u8)h);
+                sendMsg(w, true);
+                g.status = "Buying...";
+            } else {
+                g.status = "Not enough coins - play matches to earn more";
+            }
+        }
+    }
+    const char* coins = TextFormat("$ %u", g.coins);
+    DrawText(coins, VW - 12 - MeasureText(coins, 10), 62, 10, Color{ 252, 206, 48, 255 });
+
     if (uiButton({ VW - 96.0f, 210, 42, 20 }, "SAVE")) {
-        sendLoadout(g.selWeapon, g.selSkin, g.selSub);
+        sendLoadout(g.selWeapon, g.selSkin, g.selSub, g.selHat);
         g.status = "Saving...";
     }
     if (uiButton({ VW - 50.0f, 210, 42, 20 }, "BACK"))
         g.screen = SC_MENU;
     if (!g.status.empty())
-        DrawText(g.status.c_str(), 246, 236, 10, Color{ 150, 240, 150, 255 });
+        DrawText(g.status.c_str(), 200, 246, 10, Color{ 150, 240, 150, 255 });
 }
 
 static void screenSettings() {
-    drawMenuBackdrop("display settings");
-    Rectangle panel = { VW / 2.0f - 100, 92, 200, 130 };
+    drawMenuBackdrop("settings");
+    Rectangle panel = { VW / 2.0f - 100, 84, 200, 176 };
     uiPanel(panel);
 
-    DrawText("WINDOW SIZE", (int)panel.x + 12, (int)panel.y + 10, 10, GRAY);
+    DrawText("WINDOW SIZE", (int)panel.x + 12, (int)panel.y + 8, 10, GRAY);
     for (int s = 1; s <= 3; s++) {
-        Rectangle b = { panel.x + 12 + (s - 1) * 60, panel.y + 24, 56, 20 };
+        Rectangle b = { panel.x + 12 + (s - 1) * 60, panel.y + 20, 56, 18 };
         bool current = !g_disp.fullscreen && g_disp.scale == s;
         if (uiButton(b, TextFormat("%dx", s), !g_disp.fullscreen,
                      current ? Color{ 150, 70, 20, 255 } : Color{ 70, 74, 105, 255 })) {
@@ -1125,19 +1415,39 @@ static void screenSettings() {
             applyDisplay();
         }
     }
-    DrawText(TextFormat("windowed: %dx%d", VW * g_disp.scale, VH * g_disp.scale),
-             (int)panel.x + 12, (int)panel.y + 50, 10, Color{ 120, 118, 150, 255 });
-
-    if (uiButton({ panel.x + 12, panel.y + 66, 176, 20 },
+    if (uiButton({ panel.x + 12, panel.y + 42, 176, 18 },
                  g_disp.fullscreen ? "FULLSCREEN: ON" : "FULLSCREEN: OFF", true,
                  g_disp.fullscreen ? Color{ 150, 70, 20, 255 } : Color{ 70, 74, 105, 255 })) {
         g_disp.fullscreen = !g_disp.fullscreen;
         applyDisplay();
     }
-    DrawText(TextFormat("current output: %dx%d", GetScreenWidth(), GetScreenHeight()),
-             (int)panel.x + 12, (int)panel.y + 92, 10, Color{ 120, 118, 150, 255 });
+    DrawText(TextFormat("output: %dx%d", GetScreenWidth(), GetScreenHeight()),
+             (int)panel.x + 12, (int)panel.y + 64, 10, Color{ 120, 118, 150, 255 });
 
-    if (uiButton({ panel.x + 12, panel.y + 106, 176, 18 }, "BACK"))
+    DrawText(TextFormat("MUSIC %d", g_disp.music), (int)panel.x + 12, (int)panel.y + 80, 10, GRAY);
+    float mv = g_disp.music / 100.0f;
+    if (uiSlider({ panel.x + 78, panel.y + 78, 110, 12 }, mv, 101)) {
+        g_disp.music = (int)(mv * 100 + 0.5f);
+        applyVolumes();
+        saveDisplayCfg();
+    }
+    DrawText(TextFormat("SFX   %d", g_disp.sfx), (int)panel.x + 12, (int)panel.y + 96, 10, GRAY);
+    float sv = g_disp.sfx / 100.0f;
+    if (uiSlider({ panel.x + 78, panel.y + 94, 110, 12 }, sv, 102)) {
+        g_disp.sfx = (int)(sv * 100 + 0.5f);
+        applyVolumes();
+        saveDisplayCfg();
+    }
+
+    if (uiButton({ panel.x + 12, panel.y + 112, 176, 18 },
+                 g_disp.showFps ? "SHOW FPS: ON" : "SHOW FPS: OFF", true,
+                 g_disp.showFps ? Color{ 150, 70, 20, 255 } : Color{ 70, 74, 105, 255 })) {
+        g_disp.showFps = !g_disp.showFps;
+        saveDisplayCfg();
+    }
+
+    if (uiButton({ panel.x + 12, panel.y + 136, 176, 18 },
+                 g.settingsFrom == SC_MATCH ? "BACK TO MATCH" : "BACK"))
         g.screen = g.settingsFrom;
 }
 
@@ -1188,19 +1498,22 @@ static void screenResults() {
     DrawRectangle(VW / 2 + 30, 74, 60, 4, cb);
 
     int y = 88;
-    DrawText("PLAYER", 90, y, 10, GRAY);
-    DrawText("SPLATS", 270, y, 10, GRAY);
-    DrawText("DEATHS", 320, y, 10, GRAY);
-    DrawText("INKED", 372, y, 10, GRAY);
+    DrawText("PLAYER", 70, y, 10, GRAY);
+    DrawText("SPLATS", 240, y, 10, GRAY);
+    DrawText("DEATHS", 290, y, 10, GRAY);
+    DrawText("INKED", 342, y, 10, GRAY);
+    DrawText("COINS", 392, y, 10, GRAY);
     y += 13;
     for (auto& row : g.resRows) {
         Color c = teamColor(g.colorPair, row.team);
-        if ((int)row.slot == g.mySlot) DrawRectangle(84, y - 1, 330, 12, Color{ 60, 56, 90, 160 });
-        DrawRectangle(90, y + 2, 6, 6, c);
-        DrawText(row.name.c_str(), 102, y, 10, (int)row.slot == g.mySlot ? WHITE : Color{ 210, 208, 226, 255 });
-        DrawText(TextFormat("%u", row.kills), 274, y, 10, WHITE);
-        DrawText(TextFormat("%u", row.deaths), 324, y, 10, WHITE);
-        DrawText(TextFormat("%u", row.paint), 372, y, 10, WHITE);
+        if ((int)row.slot == g.mySlot) DrawRectangle(64, y - 1, 372, 12, Color{ 60, 56, 90, 160 });
+        DrawRectangle(70, y + 2, 6, 6, c);
+        DrawText(row.name.c_str(), 82, y, 10, (int)row.slot == g.mySlot ? WHITE : Color{ 210, 208, 226, 255 });
+        DrawText(TextFormat("%u", row.kills), 244, y, 10, WHITE);
+        DrawText(TextFormat("%u", row.deaths), 294, y, 10, WHITE);
+        DrawText(TextFormat("%u", row.paint), 342, y, 10, WHITE);
+        if (row.coins)
+            DrawText(TextFormat("+%u", row.coins), 392, y, 10, Color{ 252, 206, 48, 255 });
         y += 13;
     }
 
@@ -1234,17 +1547,23 @@ static void autopilotDrive() {
     case SC_MENU:
         if (!a.menuActed) {
             a.menuActed = true;
+            if (a.mode == 8) {                   // mode 8: park on the settings screen (UI testing)
+                g.settingsFrom = SC_MENU;
+                g.screen = SC_SETTINGS;
+                break;
+            }
             if (a.mode >= MODE_COUNT) {          // mode 9: park on the loadout screen (UI testing)
                 g.selWeapon = g.weapon;
                 g.selSkin = g.skin;
                 g.selSub = g.sub;
+                g.selHat = g.hat;
                 g.screen = SC_LOADOUT;
                 break;
             }
             if (!a.loadoutSent) {
                 a.loadoutSent = true;
                 sendLoadout((u8)GetRandomValue(0, W_COUNT - 1), (u8)GetRandomValue(0, SKIN_COUNT - 1),
-                            (u8)GetRandomValue(0, SUB_COUNT - 1));
+                            (u8)GetRandomValue(0, SUB_COUNT - 1), 0);
             }
             queueFor(a.mode);
         }
@@ -1311,8 +1630,9 @@ int main(int argc, char** argv) {
         Vector2 vm = virtualMouse();
         uiBegin(vm, IsMouseButtonDown(MOUSE_BUTTON_LEFT), IsMouseButtonPressed(MOUSE_BUTTON_LEFT), g.now);
 
-        if (g.screen == SC_MATCH) HideCursor();
+        if (g.screen == SC_MATCH && !g.escMenu) HideCursor();
         else ShowCursor();
+        g.as.updateMusic(g.screen == SC_MATCH);
 
         BeginTextureMode(rt);
         switch (g.screen) {

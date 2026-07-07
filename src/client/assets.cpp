@@ -186,6 +186,64 @@ static const char* BOMB[8] = {          // splat bomb: little pyramid drop
     "........",
 };
 
+// hats: 16x16 overlays aligned with the kid sprite (facing right)
+static const char* HAT_CAP[16] = {
+    "................", "................", "................", "................",
+    "................",
+    ".....RRRR.......",
+    "....RRRRRRr.....",
+    "....RRRRRRrr....",
+    "....RRRRRRrr....",
+    "....RRRRRRr.....",
+    ".....RRRR.......",
+    "................", "................", "................", "................", "................",
+};
+static const char* HAT_CONE[16] = {
+    "................", "................", "................", "................",
+    "................",
+    "......CCC.......",
+    ".....CCWCC......",
+    ".....CWWWC......",
+    ".....CCWCC......",
+    "......CCC.......",
+    "................",
+    "................", "................", "................", "................", "................",
+};
+static const char* HAT_PHONES[16] = {
+    "................", "................", "................",
+    "....DDD.........",
+    "....DDD.........",
+    ".....DD.........",
+    ".....DD.........",
+    ".....DD.........",
+    ".....DD.........",
+    ".....DD.........",
+    ".....DD.........",
+    "....DDD.........",
+    "....DDD.........",
+    "................", "................", "................",
+};
+static const char* HAT_CROWN[16] = {
+    "................", "................", "................", "................",
+    "................",
+    ".....G.G.G......",
+    ".....GGGGG......",
+    ".....GgGgG......",
+    ".....GgGgG......",
+    ".....GGGGG......",
+    ".....G.G.G......",
+    "................", "................", "................", "................", "................",
+};
+static const char** hatArt(int hat) {
+    switch (hat) {
+    case 1: return HAT_CAP;
+    case 2: return HAT_CONE;
+    case 3: return HAT_PHONES;
+    case 4: return HAT_CROWN;
+    default: return nullptr;
+    }
+}
+
 static const char** kidArt(int weapon) {
     switch (weapon) {
     case W_AEROSPRAY: return KID_AERO;
@@ -211,6 +269,12 @@ static Texture2D buildSprite(const char** rows, int w, int h, Color body, Color 
             case 'E': c = { 245, 245, 250, 255 }; break;
             case 'W': c = { 198, 202, 216, 255 }; break;
             case 'w': c = { 106, 110, 134, 255 }; break;
+            case 'R': c = { 190, 44, 60, 255 }; break;     // hat: cap red
+            case 'r': c = { 130, 28, 40, 255 }; break;
+            case 'C': c = { 255, 140, 20, 255 }; break;    // hat: cone orange
+            case 'G': c = { 252, 206, 48, 255 }; break;    // hat: crown gold
+            case 'g': c = { 190, 148, 24, 255 }; break;
+            case 'D': c = { 58, 58, 72, 255 }; break;      // hat: headphones
             default: continue;
             }
             ImageDrawPixel(&img, x, y, c);
@@ -283,6 +347,9 @@ static Texture2D buildMapTexture(const GameMap& map, u8 colorPair) {
 
 // ---------------- sound synthesis ----------------
 
+float g_sfxVol = 0.8f;
+float g_musVol = 0.55f;
+
 static constexpr int SR = 22050;
 
 static Wave makeWave(float seconds, const std::function<float(float)>& f) {
@@ -320,7 +387,7 @@ void SoundPool::play(float pitch, float vol) {
     if (!ok) return;
     Sound& s = alias[i++ % 4];
     SetSoundPitch(s, pitch);
-    SetSoundVolume(s, vol);
+    SetSoundVolume(s, vol * g_sfxVol);
     PlaySound(s);
 }
 
@@ -334,7 +401,74 @@ void SoundPool::unload() {
 void Assets::playS(Sound s, float pitch) {
     if (!audio) return;
     SetSoundPitch(s, pitch);
+    SetSoundVolume(s, g_sfxVol);
     PlaySound(s);
+}
+
+// ---------------- procedural chiptune loops ----------------
+
+static float noteFreq(int semi) { return 220.0f * powf(2.0f, semi / 12.0f); }
+
+// square-wave pluck with decay, t local to the note
+static float pluck(float t, float freq, float amp, float decay) {
+    if (t < 0) return 0;
+    float sq = sinf(6.2832f * freq * t) > 0 ? 1.0f : -1.0f;
+    return sq * amp * expf(-t * decay);
+}
+
+static Wave makeMenuLoop() {
+    // 8 bars, 100 BPM, Am F C G — mellow plucks over a soft bass
+    const float beat = 0.6f;
+    const float dur = 16 * beat;
+    static const int roots[4] = { 0, -4, 3, -2 };            // A F C G
+    return makeWave(dur, [=](float t) {
+        int b = (int)(t / beat);
+        float bt = t - b * beat;
+        int root = roots[(b / 4) % 4];
+        float out = 0;
+        out += pluck(bt, noteFreq(root) * 0.5f, 0.10f, 4.0f);           // bass on the beat
+        int arpStep = (int)(bt / (beat / 2));                           // 8th-note arp
+        static const int arp[2] = { 7, 12 };
+        float at = bt - arpStep * (beat / 2);
+        out += sinf(6.2832f * noteFreq(root + arp[arpStep & 1]) * t) * 0.06f * expf(-at * 6.0f);
+        if (bt > beat * 0.5f)                                           // offbeat hat tick
+            out += frnd() * 0.015f * expf(-(bt - beat * 0.5f) * 60.0f);
+        return out;
+    });
+}
+
+static Wave makeMatchLoop() {
+    // 8 bars, 138 BPM — driving bass eighths, punchy lead, snare on 2 & 4
+    const float beat = 0.435f;
+    const float dur = 32 * beat;
+    static const int roots[4] = { 0, 0, -4, -2 };
+    static const int lead[16] = { 12, 12, 15, 12, 17, 15, 12, 10, 12, 12, 15, 17, 19, 17, 15, 12 };
+    return makeWave(dur, [=](float t) {
+        int b = (int)(t / beat);
+        float bt = t - b * beat;
+        int root = roots[(b / 8) % 4];
+        float out = 0;
+        float et = fmodf(bt, beat / 2);                                 // bass 8ths
+        out += pluck(et, noteFreq(root) * 0.5f, 0.11f, 10.0f);
+        int li = (b * 2 + (bt >= beat / 2 ? 1 : 0)) % 16;               // lead 8ths
+        out += pluck(fmodf(bt, beat / 2), noteFreq(root + lead[li]), 0.055f, 7.0f);
+        if ((b & 1) == 1)                                               // snare on 2 & 4
+            out += frnd() * 0.06f * expf(-bt * 25.0f);
+        return out;
+    });
+}
+
+void Assets::updateMusic(bool inMatch) {
+    if (!audio) return;
+    if (!musStarted || inMatch != musIsMatch) {
+        if (musStarted) StopSound(musCur);
+        musCur = inMatch ? musMatch : musMenu;
+        musIsMatch = inMatch;
+        musStarted = true;
+        PlaySound(musCur);
+    }
+    SetSoundVolume(musCur, g_musVol);
+    if (!IsSoundPlaying(musCur)) PlaySound(musCur);   // loop
 }
 
 void Assets::init() {
@@ -383,6 +517,15 @@ void Assets::init() {
         sThrow = LoadSoundFromWave(makeWave(0.12f, [](float t) {
             return sinf(6.2832f * (300.0f + 900.0f * t) * t) * expf(-t * 16.0f) * 0.4f;
         }));
+        sReady = LoadSoundFromWave(makeWave(0.35f, [](float t) {
+            float fr = t < 0.12f ? 660.0f : (t < 0.24f ? 880.0f : 1100.0f);
+            return sinf(6.2832f * fr * t) * expf(-fmodf(t, 0.12f) * 10.0f) * 0.4f;
+        }));
+        sChat = LoadSoundFromWave(makeWave(0.09f, [](float t) {
+            return sinf(6.2832f * (900.0f - 300.0f * t) * t) * expf(-t * 30.0f) * 0.4f;
+        }));
+        musMenu = LoadSoundFromWave(makeMenuLoop());
+        musMatch = LoadSoundFromWave(makeMatchLoop());
     }
 
     // loadout previews use color pair 0, team A
@@ -390,6 +533,8 @@ void Assets::init() {
         for (int s = 0; s < SKIN_COUNT; s++)
             kidPreview[w][s] = buildSprite(kidArt(w), 16, 16, teamColor(0, TEAM_A), teamColorDark(0, TEAM_A), skinColor((u8)s));
     squidPreview = buildSprite(SQUID, 16, 16, teamColor(0, TEAM_A), teamColorDark(0, TEAM_A), skinColor(0));
+    for (int h = 1; h < HAT_COUNT; h++)
+        hats[h] = buildSprite(hatArt(h), 16, 16, WHITE, GRAY, WHITE);
 }
 
 void Assets::buildMatchAssets(u8 colorPair, const GameMap& map) {

@@ -16,21 +16,26 @@ static const char* BOT_NAMES[] = {
     "InkyMcSplat", "Squidward2",
 };
 
-void Match::start(u8 mode_, int mapId, u32 seed) {
+void Match::start(u8 mode_, int mapId, u32 seed, float matchTime, int killTarget) {
     rng.seed(seed);
     map.load(mapId);
     paint.clear();
     mode = mode_;
     colorPair = (u8)(rng() % COLOR_PAIR_COUNT);
-    timeLeft = (mode == MODE_TURF) ? TURF_TIME : TDM_TIME;
+    timeLeft = matchTime;
+    tdmKillTarget = killTarget;
     tick = 0;
     scoreA = scoreB = 0;
     for (auto& p : players) p = PlayerState{};
     projs.clear();
     grenades.clear();
+    storms.clear();
     paintDeltas.clear();
     killEvents.clear();
     boomEvents.clear();
+    chatEvents.clear();
+    specialEvents.clear();
+    introT = MATCH_INTRO_TIME;
     paintableTotal = paint.paintableTotal(map);
     if (paintableTotal < 1) paintableTotal = 1;
     ended = false;
@@ -45,7 +50,7 @@ int Match::humanCount() const {
     return n;
 }
 
-int Match::addPlayer(const std::string& name, u8 weapon, u8 skin, u8 sub, bool isBot, void* peer, int64_t accountId) {
+int Match::addPlayer(const std::string& name, u8 weapon, u8 skin, u8 sub, u8 hat, bool isBot, void* peer, int64_t accountId) {
     int slot = -1;
     for (int i = 0; i < MAX_PLAYERS; i++)
         if (!players[i].active) { slot = i; break; }
@@ -65,13 +70,14 @@ int Match::addPlayer(const std::string& name, u8 weapon, u8 skin, u8 sub, bool i
     p.weapon = weapon < W_COUNT ? weapon : W_SPLATTERSHOT;
     p.skin = skin < SKIN_COUNT ? skin : 0;
     p.sub = sub < SUB_COUNT ? sub : SUB_SPLAT_BOMB;
+    p.hat = hat < HAT_COUNT ? hat : 0;
     p.team = (nA <= nB) ? TEAM_A : TEAM_B;
     p.spawnIdx = (p.team == TEAM_A ? nA : nB) % TEAM_SIZE;
     respawn(p);
     return slot;
 }
 
-int Match::replaceBotWithHuman(const std::string& name, u8 weapon, u8 skin, u8 sub, void* peer, int64_t accountId) {
+int Match::replaceBotWithHuman(const std::string& name, u8 weapon, u8 skin, u8 sub, u8 hat, void* peer, int64_t accountId) {
     int humA = 0, humB = 0;
     for (const auto& p : players)
         if (p.active && !p.isBot) (p.team == TEAM_A ? humA : humB)++;
@@ -96,6 +102,7 @@ int Match::replaceBotWithHuman(const std::string& name, u8 weapon, u8 skin, u8 s
     p.weapon = weapon < W_COUNT ? weapon : W_SPLATTERSHOT;
     p.skin = skin < SKIN_COUNT ? skin : 0;
     p.sub = sub < SUB_COUNT ? sub : SUB_SPLAT_BOMB;
+    p.hat = hat < HAT_COUNT ? hat : 0;
     p.team = team;
     p.spawnIdx = spawnIdx;
     respawn(p);
@@ -118,7 +125,7 @@ void Match::fillWithBots() {
     for (int i = 0; humanCount() + i < MAX_PLAYERS; i++) {
         std::string nm = BOT_NAMES[(nameOff + i) % 12];
         if (addPlayer(nm, (u8)(rng() % W_COUNT), (u8)(rng() % SKIN_COUNT),
-                      (u8)(rng() % SUB_COUNT), true, nullptr, 0) < 0) break;
+                      (u8)(rng() % SUB_COUNT), (u8)(rng() % HAT_COUNT), true, nullptr, 0) < 0) break;
     }
 }
 
@@ -131,6 +138,9 @@ void Match::respawn(PlayerState& p) {
     p.buttons = p.prevButtons = 0;
     p.charge = 0;
     p.barrage = 0;
+    p.zookaT = 0;
+    p.shieldT = 0;
+    p.spawnShieldT = SPAWN_PROTECT_TIME;
     p.charging = p.swimming = p.rolling = false;
     p.fireCd = 0.35f;   // brief no-fire after spawning
 }
@@ -139,6 +149,8 @@ void Match::handleInput(int slot, Vec2 pos, float aimRad, u8 buttons) {
     if (slot < 0 || slot >= MAX_PLAYERS) return;
     PlayerState& p = players[slot];
     if (!p.active || p.isBot || p.dead || ended) return;
+    p.lastInputAge = 0;
+    if (introT > 0) { p.aim = aimRad; return; }   // frozen during 3-2-1-GO
 
     // trust the client's movement but clamp it to plausible speed + walls
     Vec2 d = pos - p.pos;
@@ -172,12 +184,19 @@ void Match::spawnPellets(PlayerState& p, int slot, const WeaponDef& wd, int pell
     }
 }
 
+void Match::creditPaint(int owner, size_t before) {
+    u32 n = (u32)(paintDeltas.size() - before);
+    if (owner < 0 || owner >= MAX_PLAYERS || !players[owner].active) return;
+    players[owner].paintCells += n;
+    players[owner].special += n;               // painting charges the special
+    if (players[owner].special > SPECIAL_COST) players[owner].special = SPECIAL_COST;
+}
+
 void Match::explodeAt(Vec2 pos, u8 team, int owner, float rInner, float dmgInner,
                       float rOuter, float dmgOuter, float paintR, int skipSlot) {
     size_t before = paintDeltas.size();
     paint.paintCircle(map, pos.x, pos.y, paintR, team, paintDeltas);
-    if (owner >= 0 && owner < MAX_PLAYERS)
-        players[owner].paintCells += (u32)(paintDeltas.size() - before);
+    creditPaint(owner, before);
     for (int j = 0; j < MAX_PLAYERS; j++) {
         if (j == skipSlot) continue;
         PlayerState& q = players[j];
@@ -264,7 +283,7 @@ void Match::fireChargerRay(PlayerState& p, int slot, float t) {
             painted = 0;
             size_t before = paintDeltas.size();
             paint.paintCircle(map, pos.x, pos.y, pr, p.team, paintDeltas);
-            p.paintCells += (u32)(paintDeltas.size() - before);
+            creditPaint(slot, before);
         }
         bool hitSomeone = false;
         for (int j = 0; j < MAX_PLAYERS; j++) {
@@ -279,6 +298,81 @@ void Match::fireChargerRay(PlayerState& p, int slot, float t) {
         if (hitSomeone && !pierce) break;
     }
     p.firingVisT = 0.18f;
+}
+
+void Match::fireZookaRay(PlayerState& p, int slot) {
+    Vec2 dir = { cosf(p.aim), sinf(p.aim) };
+    Vec2 pos = p.pos + dir * (PLAYER_R + 2.0f);
+    float step = 4.0f, painted = 0;
+    for (float d = 0; d < ZOOKA_RANGE; d += step) {
+        pos = pos + dir * step;
+        if (map.solidAtPx(pos.x, pos.y)) break;
+        painted += step;
+        if (painted >= 8.0f) {
+            painted = 0;
+            size_t before = paintDeltas.size();
+            paint.paintCircle(map, pos.x, pos.y, ZOOKA_PAINT_R, p.team, paintDeltas);
+            creditPaint(slot, before);
+        }
+        for (int j = 0; j < MAX_PLAYERS; j++) {
+            PlayerState& q = players[j];
+            if (!q.active || q.dead || q.team == p.team) continue;
+            Vec2 dq = q.pos - pos;
+            if (dq.x * dq.x + dq.y * dq.y < (PLAYER_R + 4.0f) * (PLAYER_R + 4.0f))
+                damagePlayer(j, ZOOKA_DMG, slot);   // pierces through players
+        }
+    }
+}
+
+void Match::activateSpecial(int slot, PlayerState& p) {
+    p.special = 0;
+    u8 kind = WEAPON_SPECIAL[p.weapon];
+    switch (kind) {
+    case SP_INKZOOKA:
+        p.zookaT = ZOOKA_TIME;
+        p.charging = p.rolling = false;
+        p.charge = 0;
+        p.barrage = 0;
+        break;
+    case SP_BUBBLE:
+        p.shieldT = BUBBLE_TIME;
+        break;
+    case SP_INKSTORM: {
+        Vec2 dir = { cosf(p.aim), sinf(p.aim) };
+        Vec2 pos = p.pos;
+        for (float d = 0; d < STORM_THROW_RANGE; d += 6.0f) {
+            Vec2 n = pos + dir * 6.0f;
+            if (map.solidAtPx(n.x, n.y)) break;
+            pos = n;
+        }
+        storms.push_back({ pos, p.team, (u8)slot, STORM_TIME });
+        break;
+    }
+    }
+    specialEvents.push_back({ (u8)slot, kind });
+}
+
+void Match::updateStorms(float dt) {
+    for (size_t i = 0; i < storms.size(); ) {
+        Storm& st = storms[i];
+        st.t -= dt;
+        // paint drips raining inside the cloud
+        for (int k = 0; k < 2; k++) {
+            float a = frand(0, 6.2832f), r = frand(0, STORM_RADIUS);
+            size_t before = paintDeltas.size();
+            paint.paintCircle(map, st.pos.x + cosf(a) * r, st.pos.y + sinf(a) * r,
+                              frand(4.0f, 7.0f), st.team, paintDeltas);
+            creditPaint(st.owner, before);
+        }
+        for (int j = 0; j < MAX_PLAYERS; j++) {
+            PlayerState& q = players[j];
+            if (!q.active || q.dead || q.team == st.team) continue;
+            if (vlen(q.pos - st.pos) < STORM_RADIUS)
+                damagePlayer(j, STORM_DPS * dt, st.owner);
+        }
+        if (st.t <= 0) { storms[i] = storms.back(); storms.pop_back(); }
+        else i++;
+    }
 }
 
 void Match::updateWeapon(int slot, PlayerState& p, float dt) {
@@ -296,6 +390,18 @@ void Match::updateWeapon(int slot, PlayerState& p, float dt) {
         return;
     }
 
+    // inkzooka replaces the main weapon while active
+    if (p.zookaT > 0) {
+        p.zookaT -= dt;
+        if (held && p.fireCd <= 0) {
+            p.fireCd = ZOOKA_INTERVAL;
+            fireZookaRay(p, slot);
+            p.firingVisT = 0.2f;
+            p.spawnShieldT = 0;
+        }
+        return;
+    }
+
     switch (p.weapon) {
     case W_SPLATTERSHOT:
     case W_AEROSPRAY:
@@ -306,6 +412,7 @@ void Match::updateWeapon(int slot, PlayerState& p, float dt) {
             spawnPellets(p, slot, wd, wd.pellets, wd.spreadDeg, wd.projSpeed, wd.range, wd.dmg, wd.paintR,
                          p.weapon == W_BLASTER);
             p.firingVisT = p.weapon == W_BLASTER ? 0.2f : 0.12f;
+            p.spawnShieldT = 0;
         }
         break;
     case W_SPLATLING:
@@ -317,6 +424,7 @@ void Match::updateWeapon(int slot, PlayerState& p, float dt) {
                 p.ink -= wd.inkCost;
                 spawnPellets(p, slot, wd, 1, wd.spreadDeg, wd.projSpeed, wd.range, wd.dmg, wd.paintR);
                 p.firingVisT = 0.1f;
+                p.spawnShieldT = 0;
             }
             if (p.ink < wd.inkCost) p.barrage = 0;
         } else if (held) {                              // revving up
@@ -333,11 +441,13 @@ void Match::updateWeapon(int slot, PlayerState& p, float dt) {
         break;
     case W_ROLLER:
         p.rolling = held && p.ink > 1.0f;
+        if (p.rolling) p.spawnShieldT = 0;
         if (pressed && p.fireCd <= 0 && p.ink >= wd.inkCost) {
             p.fireCd = wd.fireInterval;
             p.ink -= wd.inkCost;
             spawnPellets(p, slot, wd, wd.pellets, wd.spreadDeg, wd.projSpeed, wd.range, wd.dmg, wd.paintR);
             p.firingVisT = 0.2f;
+            p.spawnShieldT = 0;
         }
         break;
     case W_CHARGER:
@@ -353,6 +463,7 @@ void Match::updateWeapon(int slot, PlayerState& p, float dt) {
                 p.ink -= inkNeed;
                 p.fireCd = wd.fireInterval;
                 fireChargerRay(p, slot, p.charge);
+                p.spawnShieldT = 0;
             }
             p.charge = 0;
         }
@@ -363,6 +474,7 @@ void Match::updateWeapon(int slot, PlayerState& p, float dt) {
 void Match::damagePlayer(int victimSlot, float dmg, int killerSlot) {
     PlayerState& v = players[victimSlot];
     if (!v.active || v.dead) return;
+    if (v.shieldT > 0 || v.spawnShieldT > 0) return;   // bubbler / spawn protection
     v.hp -= dmg;
     v.regenDelay = 5.0f;
     if (v.hp > 0) return;
@@ -377,15 +489,20 @@ void Match::damagePlayer(int victimSlot, float dmg, int killerSlot) {
 
     u8 killerTeam = v.team == TEAM_A ? TEAM_B : TEAM_A;
     if (killerSlot >= 0 && killerSlot < MAX_PLAYERS && players[killerSlot].active) {
-        players[killerSlot].kills++;
-        killerTeam = players[killerSlot].team;
+        PlayerState& k = players[killerSlot];
+        k.kills++;
+        k.special += SPECIAL_KILL_POINTS;
+        if (k.special > SPECIAL_COST) k.special = SPECIAL_COST;
+        killerTeam = k.team;
+        // bots celebrate sometimes
+        if (k.isBot && (rng() % 10) < 3) chatEvents.push_back({ (u8)killerSlot, 0 });
     }
     if (mode == MODE_TDM) (killerTeam == TEAM_A ? scoreA : scoreB)++;
 
     // big splat where they popped
     size_t before = paintDeltas.size();
     paint.paintCircle(map, v.pos.x, v.pos.y, 16.0f, killerTeam, paintDeltas);
-    if (killerSlot >= 0) players[killerSlot].paintCells += (u32)(paintDeltas.size() - before);
+    creditPaint(killerSlot, before);
 
     killEvents.push_back({ (u8)(killerSlot < 0 ? victimSlot : killerSlot), (u8)victimSlot, v.pos });
 }
@@ -405,7 +522,7 @@ void Match::updateProjectiles(float dt) {
             if (map.solidAtPx(pr.pos.x, pr.pos.y)) {
                 size_t before = paintDeltas.size();
                 paint.paintCircle(map, prev.x, prev.y, pr.paintR * 0.8f, pr.team, paintDeltas);
-                players[pr.owner].paintCells += (u32)(paintDeltas.size() - before);
+                creditPaint(pr.owner, before);
                 if (pr.explodes)
                     explodeAt(prev, pr.team, pr.owner, 12.0f, BLASTER_AOE_DMG, BLASTER_AOE_R, 35.0f, 16.0f);
                 dead = true;
@@ -415,7 +532,7 @@ void Match::updateProjectiles(float dt) {
                 pr.dripAcc -= PROJ_DRIP_EVERY;
                 size_t before = paintDeltas.size();
                 paint.paintCircle(map, pr.pos.x, pr.pos.y, PROJ_DRIP_R, pr.team, paintDeltas);
-                players[pr.owner].paintCells += (u32)(paintDeltas.size() - before);
+                creditPaint(pr.owner, before);
             }
             for (int j = 0; j < MAX_PLAYERS; j++) {
                 PlayerState& q = players[j];
@@ -426,7 +543,7 @@ void Match::updateProjectiles(float dt) {
                     damagePlayer(j, pr.dmg, pr.owner);
                     size_t before = paintDeltas.size();
                     paint.paintCircle(map, pr.pos.x, pr.pos.y, 5.0f, pr.team, paintDeltas);
-                    players[pr.owner].paintCells += (u32)(paintDeltas.size() - before);
+                    creditPaint(pr.owner, before);
                     if (pr.explodes)   // blaster: splash others, not the direct-hit victim
                         explodeAt(pr.pos, pr.team, pr.owner, 12.0f, BLASTER_AOE_DMG, BLASTER_AOE_R, 35.0f, 16.0f, j);
                     dead = true;
@@ -436,7 +553,7 @@ void Match::updateProjectiles(float dt) {
             if (!dead && pr.travelled >= pr.maxTravel) {
                 size_t before = paintDeltas.size();
                 paint.paintCircle(map, pr.pos.x, pr.pos.y, pr.paintR, pr.team, paintDeltas);
-                players[pr.owner].paintCells += (u32)(paintDeltas.size() - before);
+                creditPaint(pr.owner, before);
                 if (pr.explodes)
                     explodeAt(pr.pos, pr.team, pr.owner, 12.0f, BLASTER_AOE_DMG, BLASTER_AOE_R, 35.0f, 16.0f);
                 dead = true;
@@ -450,6 +567,11 @@ void Match::updateProjectiles(float dt) {
 void Match::update(float dt) {
     if (ended) return;
     tick++;
+
+    if (introT > 0) {   // 3-2-1-GO: nobody moves, clock holds
+        introT -= dt;
+        return;
+    }
     timeLeft -= dt;
 
     for (int i = 0; i < MAX_PLAYERS; i++) {
@@ -462,12 +584,26 @@ void Match::update(float dt) {
             continue;
         }
 
-        if (p.isBot) botThink(i, p, dt);
+        if (p.isBot) {
+            botThink(i, p, dt);
+        } else {
+            // if a client stops sending inputs (esc menu, hitch), release buttons
+            p.lastInputAge += dt;
+            if (p.lastInputAge > 0.6f) p.buttons = 0;
+        }
+
+        if (p.shieldT > 0) p.shieldT -= dt;
+        if (p.spawnShieldT > 0) p.spawnShieldT -= dt;
 
         u8 under = paint.atPx(p.pos.x, p.pos.y);
         p.swimming = (p.buttons & BTN_SWIM) != 0;
 
         updateWeapon(i, p, dt);
+
+        // special activation (edge-triggered)
+        bool spPressed = (p.buttons & BTN_SPECIAL) && !(p.prevButtons & BTN_SPECIAL);
+        if (spPressed && !p.swimming && p.special >= SPECIAL_COST)
+            activateSpecial(i, p);
 
         // sub weapon throw (edge-triggered)
         p.bombCd -= dt;
@@ -479,7 +615,7 @@ void Match::update(float dt) {
         if (p.rolling) {
             size_t before = paintDeltas.size();
             paint.paintCircle(map, p.pos.x, p.pos.y, ROLLER_ROLL_PAINT_R, p.team, paintDeltas);
-            p.paintCells += (u32)(paintDeltas.size() - before);
+            creditPaint(i, before);
             p.ink -= ROLLER_ROLL_DRAIN * dt;
             if (p.ink <= 0) { p.ink = 0; p.rolling = false; }
         }
@@ -502,6 +638,7 @@ void Match::update(float dt) {
 
     updateProjectiles(dt);
     updateGrenades(dt);
+    updateStorms(dt);
 
     if (mode == MODE_TURF) {
         scoreRefreshT += dt;
@@ -514,7 +651,7 @@ void Match::update(float dt) {
         }
     }
 
-    bool tdmDone = mode == MODE_TDM && (scoreA >= TDM_KILL_TARGET || scoreB >= TDM_KILL_TARGET);
+    bool tdmDone = mode == MODE_TDM && (scoreA >= tdmKillTarget || scoreB >= tdmKillTarget);
     if (timeLeft <= 0 || tdmDone) {
         ended = true;
         timeLeft = 0;
@@ -646,7 +783,12 @@ void Match::botThink(int slot, PlayerState& p, float dt) {
             buttons |= BTN_BOMB;
             b.bombT = 5.0f + frand(0.0f, 3.0f);
         }
+        // pop the special once it's charged and there's a fight on
+        if (p.special >= SPECIAL_COST) buttons |= BTN_SPECIAL;
     } else {
+        // ink storm is useful even without a target — drop it while roaming
+        if (p.special >= SPECIAL_COST && WEAPON_SPECIAL[p.weapon] == SP_INKSTORM)
+            buttons |= BTN_SPECIAL;
         b.goalT -= dt;
         if (b.goalT <= 0 || b.pathI >= b.path.size()) {
             // pick a new goal
@@ -718,6 +860,7 @@ void Match::writeRosterEntry(BufW& w, int slot) {
     w.u8_(p.team);
     w.u8_(p.weapon);
     w.u8_(p.skin);
+    w.u8_(p.hat);
     w.u8_(p.isBot ? PF_BOT : 0);
 }
 
@@ -727,6 +870,7 @@ void Match::writeSnapshot(BufW& w) {
     w.f32_(timeLeft);
     w.u16_(scoreA);
     w.u16_(scoreB);
+    w.u8_(introT > 0 ? (u8)(introT * 10.0f + 1) : 0);
     int n = 0;
     for (auto& p : players) if (p.active) n++;
     w.u8_((u8)n);
@@ -746,12 +890,17 @@ void Match::writeSnapshot(BufW& w) {
         if (p.charging) fl |= PF_CHARGING;
         if (p.rolling) fl |= PF_ROLLING;
         if (p.isBot) fl |= PF_BOT;
+        if (p.shieldT > 0 || p.spawnShieldT > 0) fl |= PF_SHIELD;
+        if (p.zookaT > 0) fl |= PF_ZOOKA;
         w.u8_(fl);
         w.u8_((u8)(p.respawnT * 10.0f));
+        w.u8_((u8)(p.special * 100.0f / SPECIAL_COST));
+        w.u8_((u8)(p.kills > 255 ? 255 : p.kills));
+        w.u8_((u8)(p.deaths > 255 ? 255 : p.deaths));
     }
-    size_t np = projs.size(), ng = grenades.size();
-    if (np + ng > 250) np = 250 - (ng > 250 ? (ng = 250, 0) : ng);
-    w.u8_((u8)(np + ng));
+    size_t np = projs.size(), ng = grenades.size(), ns = storms.size();
+    if (np + ng + ns > 250) np = 250 - ns - (ng > 250 - ns ? (ng = 250 - ns, 0) : ng);
+    w.u8_((u8)(np + ng + ns));
     for (size_t i = 0; i < np; i++) {
         w.f32_(projs[i].pos.x);
         w.f32_(projs[i].pos.y);
@@ -767,6 +916,13 @@ void Match::writeSnapshot(BufW& w) {
         w.u8_(gr.sub == SUB_SPLAT_BOMB ? PK_SPLAT_BOMB : PK_BURST_BOMB);
         // aux: deciseconds of fuse once landed (drives the blink), 255 in flight
         w.u8_(gr.landed ? (u8)(gr.fuse * 10.0f) : 255);
+    }
+    for (const Storm& st : storms) {
+        w.f32_(st.pos.x);
+        w.f32_(st.pos.y);
+        w.u8_(st.team);
+        w.u8_(PK_STORM);
+        w.u8_((u8)(st.t * 10.0f));
     }
 }
 

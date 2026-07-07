@@ -25,7 +25,7 @@ struct PlayerState {
     void* peer = nullptr;
     int64_t accountId = 0;
     std::string name;
-    u8 team = TEAM_NONE, weapon = W_SPLATTERSHOT, skin = 0;
+    u8 team = TEAM_NONE, weapon = W_SPLATTERSHOT, skin = 0, hat = 0;
     int spawnIdx = 0;
 
     Vec2 pos;
@@ -42,6 +42,11 @@ struct PlayerState {
     float regenDelay = 0;               // hp regen kicks in when this reaches 0
     u8 sub = SUB_SPLAT_BOMB;
     float bombCd = 0;
+    float special = 0;                  // meter points; full at SPECIAL_COST
+    float zookaT = 0;                   // inkzooka seconds left
+    float shieldT = 0;                  // bubbler seconds left
+    float spawnShieldT = 0;             // post-respawn protection (breaks on firing)
+    float lastInputAge = 0;             // humans: buttons cleared if inputs stop
 
     u16 kills = 0, deaths = 0;
     u32 paintCells = 0;
@@ -65,8 +70,12 @@ struct Grenade {
     float travelled = 0;
 };
 
+struct Storm { Vec2 pos; u8 team, owner; float t; };
+
 struct KillEvent { u8 killer, victim; Vec2 pos; };
 struct BoomEvent { u8 team; Vec2 pos; u8 radius; };
+struct ChatEvent { u8 slot, msg; };
+struct SpecialEvent { u8 slot, kind; };
 
 struct Match {
     GameMap map;
@@ -79,20 +88,26 @@ struct Match {
     PlayerState players[MAX_PLAYERS];
     std::vector<Projectile> projs;
     std::vector<Grenade> grenades;
+    std::vector<Storm> storms;
     std::vector<u16> paintDeltas;   // cell indices changed since last drain
     std::vector<KillEvent> killEvents;
     std::vector<BoomEvent> boomEvents;
+    std::vector<ChatEvent> chatEvents;
+    std::vector<SpecialEvent> specialEvents;
+    float introT = 0;               // 3-2-1-GO freeze at match start
     int paintableTotal = 1;
     bool ended = false;
     u8 winner = TEAM_NONE;
     float scoreRefreshT = 0;
     std::mt19937 rng{ 12345 };
 
-    void start(u8 mode_, int mapId, u32 seed);
+    int tdmKillTarget = TDM_KILL_TARGET;
+
+    void start(u8 mode_, int mapId, u32 seed, float matchTime, int killTarget);
     // returns slot or -1; picks the team with fewer players
-    int addPlayer(const std::string& name, u8 weapon, u8 skin, u8 sub, bool isBot, void* peer, int64_t accountId);
+    int addPlayer(const std::string& name, u8 weapon, u8 skin, u8 sub, u8 hat, bool isBot, void* peer, int64_t accountId);
     // human replaces a bot on the emptier-of-humans team; returns slot or -1
-    int replaceBotWithHuman(const std::string& name, u8 weapon, u8 skin, u8 sub, void* peer, int64_t accountId);
+    int replaceBotWithHuman(const std::string& name, u8 weapon, u8 skin, u8 sub, u8 hat, void* peer, int64_t accountId);
     void humanLeft(int slot);       // converts the slot to a bot
     void fillWithBots();
     void handleInput(int slot, Vec2 pos, float aimRad, u8 buttons);
@@ -111,6 +126,11 @@ private:
     void spawnPellets(PlayerState& p, int slot, const WeaponDef& wd, int pellets, float spreadDeg,
                       float speed, float range, float dmg, float paintR, bool explodes = false);
     void fireChargerRay(PlayerState& p, int slot, float t);
+    void fireZookaRay(PlayerState& p, int slot);
+    void activateSpecial(int slot, PlayerState& p);
+    void updateStorms(float dt);
+    // paint-cell attribution + special-meter charge for cells added since `before`
+    void creditPaint(int owner, size_t before);
     void throwBomb(PlayerState& p, int slot);
     void explodeAt(Vec2 pos, u8 team, int owner, float rInner, float dmgInner,
                    float rOuter, float dmgOuter, float paintR, int skipSlot = -1);

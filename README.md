@@ -28,16 +28,27 @@ generated procedurally at runtime; there are no asset files.
   *Burst Bomb* (cheap, pops on impact), and four ink styles.
 - **Three maps** — Dockside, Warehouse, Plaza — all mirror-symmetric, rotating
   between matches.
+- **Special weapons** — painting turf (and splatting) charges your special
+  meter; press **F** to unleash it: **Inkzooka** (piercing long-range blasts),
+  **Ink Storm** (a thrown raincloud that paints and chips enemies), or
+  **Bubbler** (brief invulnerability). Which special you get depends on your
+  main weapon.
+- **Progression** — every match pays out coins (kills, turf inked, win bonus);
+  spend them on hats (Cap, Cone, Phones, Crown) that render on your character.
 - **Two modes**
   - **Turf War (4v4)** — 3 minutes; the team that paints more floor wins.
   - **Team Deathmatch** — first team to 25 splats (or best in 4 minutes).
 - **Splatoon mechanics** — paint the ground, swim in your own ink (SHIFT) to
-  move fast and refill your tank, get slowed in enemy ink, respawn on your pad.
+  move fast and refill your tank, get slowed in enemy ink, respawn on your pad
+  with brief spawn protection (a shield that pops when you fire).
+- **Match UX** — 3-2-1-GO intro, TAB scoreboard, death cam that follows your
+  killer, kill feed, quick chat (C/X/V/B) with speech bubbles, ESC pause menu.
 - **Bots** — matches always fill to 4v4 with pathfinding bots that fight, paint
-  objectives, and throw bombs; humans can join a running match and take over a
-  bot slot. Leavers are replaced by bots.
-- **Display options** — 1x/2x/3x window sizes and borderless fullscreen with
-  crisp integer pixel scaling (Settings, saved to `settings.txt`).
+  objectives, throw bombs, pop specials, and occasionally taunt; humans can
+  join a running match and take over a bot slot. Leavers are replaced by bots.
+- **Display & audio options** — 1x/2x/3x window sizes and borderless fullscreen
+  with crisp integer pixel scaling, music/SFX volume sliders (procedural
+  chiptune soundtrack), FPS display (Settings, saved to `settings.txt`).
 
 ## Building (Windows)
 
@@ -63,6 +74,24 @@ build\splatont.exe               # client; enter the server IP (127.0.0.1)
 Multiple clients on one machine work fine (each needs its own account). Other
 PCs on your LAN can connect to your IP; the backend is local-only for now.
 
+### Hosting beyond your LAN
+
+The server was hardened for remote play and is ready to be exposed when you
+want to try it:
+
+- Passwords are stored with **PBKDF2-HMAC-SHA256** (60k iterations, salted).
+  Old sha256 hashes from earlier versions upgrade automatically on login.
+- Clients get a **session token** on login and resume automatically after a
+  disconnect without resending the password.
+- Failed logins are **rate-limited per IP** (5 tries / minute).
+- `server.cfg` (created next to the exe on first run) controls the port, match
+  lengths, TDM kill target, and lobby countdown without recompiling.
+
+To host: run `splatont_server.exe` on the host machine, forward **UDP 27777**
+(or your configured port) on the router, and give players your public IP. For
+anything serious later, the remaining work is server-authoritative movement
+(currently client-predicted and clamped) and lag compensation.
+
 ### Controls
 
 | Input | Action |
@@ -71,8 +100,11 @@ PCs on your LAN can connect to your IP; the backend is local-only for now.
 | Mouse | aim |
 | LMB | shoot (hold to charge the Charger/Splatling, hold to roll with the Roller) |
 | RMB / Q | throw your sub weapon (costs ink — see the notch on the ink tank) |
+| F / MMB | activate your special when the meter is full |
 | SHIFT | squid form — swim fast in your ink, refills tank, can't shoot |
-| ESC | leave match |
+| TAB | scoreboard |
+| C / X / V / B | quick chat: Booyah! / This way! / Help! / Nice! |
+| ESC | pause menu (resume · settings · leave match) |
 
 ### Headless smoke test
 

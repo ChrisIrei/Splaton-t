@@ -31,6 +31,22 @@ bool uiButton(Rectangle r, const char* label, bool enabled, Color accent) {
     return clicked;
 }
 
+bool uiSlider(Rectangle r, float& val, int id) {
+    if (g_ui.pressed && hot(r)) g_ui.focusId = id;
+    bool dragging = g_ui.down && g_ui.focusId == id;
+    if (!g_ui.down && g_ui.focusId == id) g_ui.focusId = -1;
+    if (dragging) {
+        val = (g_ui.mouse.x - r.x) / r.width;
+        if (val < 0) val = 0;
+        if (val > 1) val = 1;
+    }
+    DrawRectangle((int)r.x, (int)(r.y + r.height / 2 - 2), (int)r.width, 4, Color{ 40, 38, 56, 255 });
+    DrawRectangle((int)r.x, (int)(r.y + r.height / 2 - 2), (int)(r.width * val), 4, Color{ 250, 114, 20, 255 });
+    int kx = (int)(r.x + r.width * val);
+    DrawRectangle(kx - 2, (int)r.y, 5, (int)r.height, dragging ? WHITE : Color{ 200, 196, 230, 255 });
+    return dragging;
+}
+
 bool uiTextBox(Rectangle r, std::string& text, int id, bool password, int maxLen, const char* placeholder) {
     bool h = hot(r);
     if (g_ui.pressed) g_ui.focusId = h ? id : (g_ui.focusId == id ? -1 : g_ui.focusId);

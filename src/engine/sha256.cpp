@@ -42,7 +42,7 @@ struct Ctx {
 };
 } // namespace
 
-std::string sha256_hex(const void* data, size_t len) {
+void sha256_raw(const void* data, size_t len, unsigned char out[32]) {
     Ctx ctx;
     const uint8_t* p = (const uint8_t*)data;
     size_t full = len / 64;
@@ -58,8 +58,70 @@ std::string sha256_hex(const void* data, size_t len) {
     ctx.block(tail);
     if (tlen == 128) ctx.block(tail + 64);
 
+    for (int i = 0; i < 8; i++) {
+        out[i * 4] = (unsigned char)(ctx.h[i] >> 24);
+        out[i * 4 + 1] = (unsigned char)(ctx.h[i] >> 16);
+        out[i * 4 + 2] = (unsigned char)(ctx.h[i] >> 8);
+        out[i * 4 + 3] = (unsigned char)(ctx.h[i]);
+    }
+}
+
+std::string sha256_hex(const void* data, size_t len) {
+    unsigned char d[32];
+    sha256_raw(data, len, d);
     char out[65];
-    for (int i = 0; i < 8; i++) snprintf(out + i * 8, 9, "%08x", ctx.h[i]);
+    for (int i = 0; i < 32; i++) snprintf(out + i * 2, 3, "%02x", d[i]);
+    return std::string(out, 64);
+}
+
+void hmac_sha256(const void* key, size_t keyLen, const void* msg, size_t msgLen, unsigned char out[32]) {
+    unsigned char k[64] = {};
+    if (keyLen > 64) sha256_raw(key, keyLen, k);
+    else memcpy(k, key, keyLen);
+
+    unsigned char ipad[64], opad[64];
+    for (int i = 0; i < 64; i++) {
+        ipad[i] = k[i] ^ 0x36;
+        opad[i] = k[i] ^ 0x5c;
+    }
+    std::string inner((const char*)ipad, 64);
+    inner.append((const char*)msg, msgLen);
+    unsigned char ih[32];
+    sha256_raw(inner.data(), inner.size(), ih);
+
+    unsigned char outer[96];
+    memcpy(outer, opad, 64);
+    memcpy(outer + 64, ih, 32);
+    sha256_raw(outer, 96, out);
+}
+
+static std::string hexDecode(const std::string& hex) {
+    std::string out;
+    for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+        auto nib = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return 0;
+        };
+        out += (char)((nib(hex[i]) << 4) | nib(hex[i + 1]));
+    }
+    return out;
+}
+
+std::string pbkdf2_hex(const std::string& password, const std::string& saltHex, int iterations) {
+    std::string salt = hexDecode(saltHex);
+    // dkLen == hLen == 32, so a single block: T1 = U1 ^ U2 ^ ... ^ Uc
+    std::string block1 = salt + std::string("\x00\x00\x00\x01", 4);
+    unsigned char u[32], t[32];
+    hmac_sha256(password.data(), password.size(), block1.data(), block1.size(), u);
+    memcpy(t, u, 32);
+    for (int i = 1; i < iterations; i++) {
+        hmac_sha256(password.data(), password.size(), u, 32, u);
+        for (int j = 0; j < 32; j++) t[j] ^= u[j];
+    }
+    char out[65];
+    for (int i = 0; i < 32; i++) snprintf(out + i * 2, 3, "%02x", t[i]);
     return std::string(out, 64);
 }
 

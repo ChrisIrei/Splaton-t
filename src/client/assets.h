@@ -4,6 +4,10 @@
 #include "shared/defs.h"
 #include "shared/sim.h"
 
+// global mixer levels (0..1), applied at play time; music volume applied per frame
+extern float g_sfxVol;
+extern float g_musVol;
+
 struct SoundPool {
     Sound base{};
     Sound alias[4]{};
@@ -24,6 +28,7 @@ struct Assets {
     Texture2D bomb[2]{};
     Texture2D kidPreview[W_COUNT][SKIN_COUNT]{};   // menu preview (team A colors)
     Texture2D squidPreview{};
+    Texture2D hats[HAT_COUNT]{};                   // [0] unused ("None")
     Texture2D mapTex{};                            // pre-rendered world
     Texture2D paintTex{};                          // PW x PH, scaled up when drawn
     Image paintImg{};
@@ -31,11 +36,16 @@ struct Assets {
 
     SoundPool sShoot, sSplat;
     Sound sKill{}, sDeath{}, sClick{}, sStart{}, sEnd{}, sQueue{}, sBoom{}, sThrow{};
+    Sound sReady{}, sChat{};                       // special charged / quick chat blip
+    Sound musMenu{}, musMatch{};                   // looping chiptune tracks
+    Sound musCur{};
+    bool musIsMatch = false, musStarted = false;
 
     void init();                                   // audio + menu previews
     void buildMatchAssets(u8 colorPair, const GameMap& map);
     void updatePaintTex(const PaintGrid& paint, u8 colorPair);
     void playS(Sound s, float pitch = 1.0f);
+    void updateMusic(bool inMatch);                // call once per frame
 };
 
 Color teamColor(u8 colorPair, u8 team);

@@ -18,6 +18,9 @@ enum : u8 {
     C_INPUT,            // f32 x, f32 y, f32 aimRad, u8 buttons
     C_LEAVE_MATCH,      // return to menu; slot is handed to a bot
     C_PING,             // u32 clientTimeMs (echoed back)
+    C_QUICKCHAT,        // u8 msgId
+    C_BUY_HAT,          // u8 hat
+    C_RESUME,           // str sessionToken (re-auth without password)
 
     // server -> client
     S_HELLO = 64,       // str motd
@@ -33,12 +36,15 @@ enum : u8 {
     S_EVENT,            // u8 eventType, ...
     S_ERROR,            // str message
     S_PONG,             // u32 clientTimeMs (echo of C_PING)
+    S_BUY_RESULT,       // u8 ok, u32 coins, u16 hatsOwned
 };
 
 enum : u8 {
     EV_KILL = 1,        // u8 killerSlot, u8 victimSlot, f32 x, f32 y
     EV_RESPAWN,         // u8 slot
     EV_BOOM,            // u8 team, f32 x, f32 y, u8 radiusPx
+    EV_CHAT,            // u8 slot, u8 msgId
+    EV_SPECIAL,         // u8 slot, u8 specialKind (activation fanfare)
 };
 
 struct BufW {

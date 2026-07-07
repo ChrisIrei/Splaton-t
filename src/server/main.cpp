@@ -28,15 +28,71 @@ static void logf(const char* fmt, ...) {
 struct Session {
     enum St { FRESH, AUTHED, QUEUED, INGAME } st = FRESH;
     Account acc;
+    std::string token;
     u8 queuedMode = MODE_TURF;
     int room = -1;
     int slot = -1;
+    double lastChat = 0;
 };
 
 struct Room {
     Match match;
     bool running = false;
 };
+
+// ---- server.cfg (created with defaults on first run) ----
+struct ServerCfg {
+    u16 port = DEFAULT_PORT;
+    float turfTime = TURF_TIME;
+    float tdmTime = TDM_TIME;
+    int tdmKills = TDM_KILL_TARGET;
+    float lobbyCountdown = LOBBY_COUNTDOWN;
+};
+static ServerCfg cfg;
+
+static void loadOrCreateCfg() {
+    FILE* f = fopen("server.cfg", "r");
+    if (!f) {
+        f = fopen("server.cfg", "w");
+        if (f) {
+            fprintf(f,
+                "# Splaton't server configuration\n"
+                "port %u\n"
+                "turf_time %d\n"
+                "tdm_time %d\n"
+                "tdm_kills %d\n"
+                "lobby_countdown %d\n",
+                DEFAULT_PORT, (int)TURF_TIME, (int)TDM_TIME, TDM_KILL_TARGET, (int)LOBBY_COUNTDOWN);
+            fclose(f);
+        }
+        return;
+    }
+    char key[64];
+    int val;
+    char line[128];
+    while (fgets(line, sizeof line, f)) {
+        if (line[0] == '#' || sscanf(line, "%63s %d", key, &val) != 2) continue;
+        if (!strcmp(key, "port")) cfg.port = (u16)val;
+        else if (!strcmp(key, "turf_time")) cfg.turfTime = (float)val;
+        else if (!strcmp(key, "tdm_time")) cfg.tdmTime = (float)val;
+        else if (!strcmp(key, "tdm_kills")) cfg.tdmKills = val;
+        else if (!strcmp(key, "lobby_countdown")) cfg.lobbyCountdown = (float)val;
+    }
+    fclose(f);
+}
+
+// ---- session tokens (in-memory; survive reconnects, not restarts) ----
+struct TokenInfo { int64_t accId; double expires; };
+static std::map<std::string, TokenInfo> tokens;
+
+// ---- per-IP auth rate limiting ----
+struct AuthLimit { int fails = 0; double resetAt = 0; };
+static std::map<u32, AuthLimit> authLimits;
+
+static double nowSec() {
+    using namespace std::chrono;
+    return duration<double>(steady_clock::now().time_since_epoch()).count();
+}
 
 static net::Host host;
 static DB db;
@@ -61,14 +117,23 @@ static int freeRoom() {
     return -1;
 }
 
-static void sendAuthOk(void* peer, const Account& a) {
+static void sendAuthOk(void* peer, Session& s) {
+    const Account& a = s.acc;
+    if (s.token.empty()) {
+        s.token = random_hex(24);
+        tokens[s.token] = { a.id, nowSec() + 86400.0 };
+    }
     BufW w;
     w.u8_(S_AUTH_OK);
     w.u32_((u32)a.id);
     w.str(a.name);
+    w.str(s.token);
     w.u8_(a.weapon);
     w.u8_(a.skin);
     w.u8_(a.sub);
+    w.u8_(a.hat);
+    w.u32_(a.coins);
+    w.u16_(a.hatsOwned);
     w.u32_(a.kills);
     w.u32_(a.deaths);
     w.u32_(a.wins);
@@ -106,12 +171,14 @@ static void startMatch(u8 mode) {
     if (r < 0) return;
     Room& room = rooms[r];
     int mapId = mapRotation++ % MAP_COUNT;
-    room.match.start(mode, mapId, (u32)time(nullptr) + mapRotation * 7919);
+    room.match.start(mode, mapId, (u32)time(nullptr) + mapRotation * 7919,
+                     mode == MODE_TURF ? cfg.turfTime : cfg.tdmTime, cfg.tdmKills);
     room.running = true;
     int humans = 0;
     for (auto& [peer, s] : sessions) {
         if (s.st != Session::QUEUED || s.queuedMode != mode) continue;
-        int slot = room.match.addPlayer(s.acc.name, s.acc.weapon, s.acc.skin, s.acc.sub, false, peer, s.acc.id);
+        int slot = room.match.addPlayer(s.acc.name, s.acc.weapon, s.acc.skin, s.acc.sub, s.acc.hat,
+                                        false, peer, s.acc.id);
         if (slot >= 0) { s.st = Session::INGAME; s.room = r; s.slot = slot; humans++; }
     }
     room.match.fillWithBots();
@@ -125,7 +192,7 @@ static void tryJoinInProgress(void* peer, Session& s) {
     for (int r = 0; r < MAX_ROOMS; r++) {
         Room& room = rooms[r];
         if (!room.running || room.match.ended || room.match.mode != s.queuedMode) continue;
-        int slot = room.match.replaceBotWithHuman(s.acc.name, s.acc.weapon, s.acc.skin, s.acc.sub, peer, s.acc.id);
+        int slot = room.match.replaceBotWithHuman(s.acc.name, s.acc.weapon, s.acc.skin, s.acc.sub, s.acc.hat, peer, s.acc.id);
         if (slot < 0) continue;
         s.st = Session::INGAME;
         s.room = r;
@@ -142,6 +209,13 @@ static void tryJoinInProgress(void* peer, Session& s) {
         logf("room %d: %s joined in progress (slot %d)", r, s.acc.name.c_str(), slot);
         return;
     }
+}
+
+static u32 coinsFor(const PlayerState& p, u8 winner) {
+    int paintBonus = (int)p.paintCells / 40;
+    if (paintBonus > 150) paintBonus = 150;
+    int result = winner == TEAM_NONE ? 60 : (p.team == winner ? 150 : 40);
+    return (u32)(80 + p.kills * 12 + paintBonus + result);
 }
 
 static void endMatch(int r) {
@@ -164,6 +238,7 @@ static void endMatch(int r) {
         w.u16_(p.kills);
         w.u16_(p.deaths);
         w.u16_((u16)(p.paintCells > 65535 ? 65535 : p.paintCells));
+        w.u16_((u16)(p.isBot ? 0 : coinsFor(p, match.winner)));
     }
     broadcastRoom(r, w, true);
 
@@ -172,10 +247,12 @@ static void endMatch(int r) {
         PlayerState& p = match.players[s.slot];
         bool won = match.winner != TEAM_NONE && p.team == match.winner;
         bool lost = match.winner != TEAM_NONE && !won;
-        db.addMatchStats(s.acc.id, p.kills, p.deaths, (int)p.paintCells, won, lost);
+        u32 coins = coinsFor(p, match.winner);
+        db.addMatchStats(s.acc.id, p.kills, p.deaths, (int)p.paintCells, won, lost, (int)coins);
         s.acc.kills += p.kills;
         s.acc.deaths += p.deaths;
         s.acc.paint += p.paintCells;
+        s.acc.coins += coins;
         s.acc.matches++;
         if (won) s.acc.wins++;
         if (lost) s.acc.losses++;
@@ -187,6 +264,13 @@ static void endMatch(int r) {
         match.winner == TEAM_A ? "A" : match.winner == TEAM_B ? "B" : "draw",
         match.scoreA, match.scoreB);
     room.running = false;
+}
+
+static bool chatThrottled(Session& s) {
+    double t = nowSec();
+    if (t - s.lastChat < 1.0) return true;
+    s.lastChat = t;
+    return false;
 }
 
 static bool accountInUse(int64_t id) {
@@ -215,6 +299,16 @@ static void handleMessage(void* peer, Session& s, BufR& r) {
     case C_LOGIN: {
         std::string user = r.str(), pass = r.str();
         if (!r.ok || s.st != Session::FRESH) { sendAuthFail(peer, "Bad request"); break; }
+
+        // per-IP rate limit on failed attempts
+        u32 host32 = net::peerHost(peer);
+        AuthLimit& lim = authLimits[host32];
+        if (lim.fails >= 5 && nowSec() < lim.resetAt) {
+            sendAuthFail(peer, "Too many attempts - wait a minute");
+            break;
+        }
+        if (nowSec() >= lim.resetAt) lim.fails = 0;
+
         Account acc;
         std::string err;
         bool ok = (id == C_REGISTER)
@@ -222,30 +316,87 @@ static void handleMessage(void* peer, Session& s, BufR& r) {
             : db.login(user, pass, acc, err);
         if (ok && accountInUse(acc.id)) { ok = false; err = "Account already logged in"; }
         if (!ok) {
+            lim.fails++;
+            lim.resetAt = nowSec() + 60.0;
             sendAuthFail(peer, err);
             logf("auth failed for '%s' from %s: %s", user.c_str(), net::peerAddress(peer).c_str(), err.c_str());
             break;
         }
+        authLimits.erase(host32);
         s.st = Session::AUTHED;
         s.acc = acc;
-        sendAuthOk(peer, acc);
+        sendAuthOk(peer, s);
         logf("%s %s from %s", acc.name.c_str(), id == C_REGISTER ? "registered" : "logged in",
             net::peerAddress(peer).c_str());
         break;
     }
+    case C_RESUME: {
+        std::string token = r.str();
+        if (!r.ok || s.st != Session::FRESH) { sendAuthFail(peer, "Bad request"); break; }
+        auto it = tokens.find(token);
+        if (it == tokens.end() || nowSec() > it->second.expires) {
+            sendAuthFail(peer, "Session expired - please log in");
+            break;
+        }
+        Account acc;
+        if (!db.loadAccount(it->second.accId, acc) || accountInUse(acc.id)) {
+            sendAuthFail(peer, "Session invalid - please log in");
+            break;
+        }
+        s.st = Session::AUTHED;
+        s.acc = acc;
+        s.token = token;
+        sendAuthOk(peer, s);
+        logf("%s resumed session from %s", acc.name.c_str(), net::peerAddress(peer).c_str());
+        break;
+    }
     case C_SET_LOADOUT: {
-        u8 weapon = r.u8_(), skin = r.u8_(), sub = r.u8_();
-        if (s.st == Session::FRESH || weapon >= W_COUNT || skin >= SKIN_COUNT || sub >= SUB_COUNT) break;
+        u8 weapon = r.u8_(), skin = r.u8_(), sub = r.u8_(), hat = r.u8_();
+        if (s.st == Session::FRESH || weapon >= W_COUNT || skin >= SKIN_COUNT ||
+            sub >= SUB_COUNT || hat >= HAT_COUNT) break;
+        if (!(s.acc.hatsOwned & (1 << hat))) hat = 0;
         s.acc.weapon = weapon;
         s.acc.skin = skin;
         s.acc.sub = sub;
-        db.setLoadout(s.acc.id, weapon, skin, sub);
+        s.acc.hat = hat;
+        db.setLoadout(s.acc.id, weapon, skin, sub, hat);
         BufW w;
         w.u8_(S_LOADOUT_OK);
         w.u8_(weapon);
         w.u8_(skin);
         w.u8_(sub);
+        w.u8_(hat);
         sendTo(peer, w, true);
+        break;
+    }
+    case C_BUY_HAT: {
+        u8 hat = r.u8_();
+        BufW w;
+        w.u8_(S_BUY_RESULT);
+        bool ok = s.st != Session::FRESH && hat > 0 && hat < HAT_COUNT &&
+                  !(s.acc.hatsOwned & (1 << hat)) && s.acc.coins >= HAT_PRICES[hat];
+        if (ok) {
+            s.acc.coins -= HAT_PRICES[hat];
+            s.acc.hatsOwned |= (u16)(1 << hat);
+            db.updateCoinsHats(s.acc.id, s.acc.coins, s.acc.hatsOwned);
+            logf("%s bought hat '%s'", s.acc.name.c_str(), HAT_NAMES[hat]);
+        }
+        w.u8_(ok ? 1 : 0);
+        w.u32_(s.acc.coins);
+        w.u16_(s.acc.hatsOwned);
+        sendTo(peer, w, true);
+        break;
+    }
+    case C_QUICKCHAT: {
+        u8 msg = r.u8_();
+        if (s.st != Session::INGAME || s.room < 0 || msg >= CHAT_COUNT) break;
+        if (chatThrottled(s)) break;
+        BufW w;
+        w.u8_(S_EVENT);
+        w.u8_(EV_CHAT);
+        w.u8_((u8)s.slot);
+        w.u8_(msg);
+        broadcastRoom(s.room, w, true);
         break;
     }
     case C_QUEUE: {
@@ -290,14 +441,15 @@ static void handleMessage(void* peer, Session& s, BufR& r) {
 }
 
 int main(int argc, char** argv) {
-    u16 port = DEFAULT_PORT;
+    loadOrCreateCfg();
+    u16 port = cfg.port;
     if (argc > 1) port = (u16)atoi(argv[1]);
 
     if (!net::init()) { logf("ENet init failed"); return 1; }
     std::string err;
     if (!db.open("splatont.db", err)) { logf("DB open failed: %s", err.c_str()); return 1; }
     if (!host.serve(port, 32)) { logf("Failed to bind UDP port %u", port); return 1; }
-    logf("Splaton't server listening on UDP %u (db: splatont.db, %d rooms)", port, MAX_ROOMS);
+    logf("Splaton't server listening on UDP %u (db: splatont.db, cfg: server.cfg, %d rooms)", port, MAX_ROOMS);
 
     using clock = std::chrono::steady_clock;
     auto last = clock::now();
@@ -355,7 +507,7 @@ int main(int argc, char** argv) {
                     if (s.st == Session::QUEUED && s.queuedMode == m) n++;
                 if (n == 0) { countdown[m] = -1; continue; }
                 if (freeRoom() < 0) continue;        // hold until a room opens up
-                if (countdown[m] < 0) countdown[m] = LOBBY_COUNTDOWN;
+                if (countdown[m] < 0) countdown[m] = cfg.lobbyCountdown;
                 countdown[m] -= TICK_DT;
                 if (countdown[m] <= 0) {
                     countdown[m] = -1;
@@ -416,6 +568,26 @@ int main(int argc, char** argv) {
                     broadcastRoom(r, w, true);
                 }
                 room.match.boomEvents.clear();
+
+                for (auto& ce : room.match.chatEvents) {
+                    BufW w;
+                    w.u8_(S_EVENT);
+                    w.u8_(EV_CHAT);
+                    w.u8_(ce.slot);
+                    w.u8_(ce.msg);
+                    broadcastRoom(r, w, true);
+                }
+                room.match.chatEvents.clear();
+
+                for (auto& se : room.match.specialEvents) {
+                    BufW w;
+                    w.u8_(S_EVENT);
+                    w.u8_(EV_SPECIAL);
+                    w.u8_(se.slot);
+                    w.u8_(se.kind);
+                    broadcastRoom(r, w, true);
+                }
+                room.match.specialEvents.clear();
 
                 if (!room.match.paintDeltas.empty()) {
                     BufW w;

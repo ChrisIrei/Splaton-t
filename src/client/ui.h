@@ -17,3 +17,5 @@ void uiPanel(Rectangle r);
 bool uiButton(Rectangle r, const char* label, bool enabled = true, Color accent = { 70, 74, 105, 255 });
 bool uiTextBox(Rectangle r, std::string& text, int id, bool password = false,
                int maxLen = 24, const char* placeholder = nullptr);
+// horizontal drag slider, val in 0..1; returns true while the user drags it
+bool uiSlider(Rectangle r, float& val, int id);

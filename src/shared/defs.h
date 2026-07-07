@@ -8,7 +8,7 @@ using u32 = uint32_t;
 using i32 = int32_t;
 using i64 = int64_t;
 
-constexpr u32 PROTOCOL_VERSION = 2;
+constexpr u32 PROTOCOL_VERSION = 3;
 constexpr u16 DEFAULT_PORT = 27777;
 
 // timing
@@ -134,6 +134,42 @@ constexpr SubDef SUBS[SUB_COUNT] = {
 constexpr float BOMB_COOLDOWN = 1.1f;          // min s between throws
 constexpr float BURST_BOMB_RANGE = 110.0f;     // px before airburst
 
+// ---------------- special weapons (charged by painting turf) ----------------
+enum : u8 { SP_INKZOOKA = 0, SP_INKSTORM, SP_BUBBLE, SP_COUNT };
+constexpr const char* SPECIAL_NAMES[SP_COUNT] = { "Inkzooka", "Ink Storm", "Bubbler" };
+// which special each main weapon charges
+constexpr u8 WEAPON_SPECIAL[W_COUNT] = {
+    SP_INKZOOKA,   // Splattershot
+    SP_INKSTORM,   // Aerospray
+    SP_BUBBLE,     // Blaster
+    SP_BUBBLE,     // Roller
+    SP_INKSTORM,   // Charger
+    SP_INKZOOKA,   // Splatling
+};
+constexpr float SPECIAL_COST = 220.0f;         // paint cells to fill the meter
+constexpr float SPECIAL_KILL_POINTS = 18.0f;   // meter points per splat
+constexpr float ZOOKA_TIME = 6.0f;             // s of Inkzooka mode
+constexpr float ZOOKA_INTERVAL = 0.55f;        // s between zooka blasts
+constexpr float ZOOKA_RANGE = 320.0f;
+constexpr float ZOOKA_DMG = 120.0f;
+constexpr float ZOOKA_PAINT_R = 9.0f;
+constexpr float STORM_TIME = 6.0f;             // s of rain
+constexpr float STORM_RADIUS = 48.0f;
+constexpr float STORM_DPS = 14.0f;
+constexpr float STORM_THROW_RANGE = 140.0f;
+constexpr float BUBBLE_TIME = 5.0f;            // s of invulnerability
+constexpr float SPAWN_PROTECT_TIME = 2.5f;     // s of post-respawn shield (ends when you fire)
+constexpr float MATCH_INTRO_TIME = 3.2f;       // 3-2-1-GO freeze at match start
+
+// ---------------- progression: coins + hats ----------------
+constexpr int HAT_COUNT = 5;
+constexpr const char* HAT_NAMES[HAT_COUNT] = { "None", "Cap", "Cone", "Phones", "Crown" };
+constexpr u32 HAT_PRICES[HAT_COUNT] = { 0, 250, 500, 900, 2000 };
+
+// ---------------- quick chat ----------------
+constexpr int CHAT_COUNT = 4;
+constexpr const char* CHAT_MSGS[CHAT_COUNT] = { "Booyah!", "This way!", "Help!", "Nice!" };
+
 constexpr int SKIN_COUNT = 4;
 
 // input buttons bitmask (client -> server)
@@ -141,6 +177,7 @@ enum : u8 {
     BTN_FIRE = 1 << 0,
     BTN_SWIM = 1 << 1,
     BTN_BOMB = 1 << 2,
+    BTN_SPECIAL = 1 << 3,
 };
 
 // snapshot player flags (server -> client)
@@ -151,10 +188,12 @@ enum : u8 {
     PF_CHARGING = 1 << 3,   // also splatling rev
     PF_ROLLING = 1 << 4,
     PF_BOT = 1 << 5,
+    PF_SHIELD = 1 << 6,     // bubbler or spawn protection
+    PF_ZOOKA = 1 << 7,      // inkzooka active
 };
 
 // snapshot entity kinds (projectile list)
-enum : u8 { PK_BLOB = 0, PK_SPLAT_BOMB = 1, PK_BURST_BOMB = 2 };
+enum : u8 { PK_BLOB = 0, PK_SPLAT_BOMB = 1, PK_BURST_BOMB = 2, PK_STORM = 3 };
 
 // color pairs per match (client maps these to RGB)
 constexpr int COLOR_PAIR_COUNT = 3; // 0: orange/blue, 1: pink/green, 2: yellow/purple
